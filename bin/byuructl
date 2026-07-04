@@ -1,0 +1,548 @@
+#!/bin/bash
+# byuructl - Control script for byuru HTTP server
+# Version: 1.0.0
+
+set -e
+
+BYURU_BIN="${BYURU_BIN:-$(which byuru 2>/dev/null || echo "")}"
+BYURU_CONFIG="${BYURU_CONFIG:-/etc/byuru/byuru.conf}"
+BYURU_PIDFILE="${BYURU_PIDFILE:-/var/run/byuru.pid}"
+BYURU_LOGDIR="${BYURU_LOGDIR:-/var/log/byuru}"
+BYURU_USER="${BYURU_USER:-}"
+BYURU_PORT="${BYURU_PORT:-8080}"
+BYURU_ROOT="${BYURU_ROOT:-/var/www/html}"
+
+if [[ -n "$TERMUX_VERSION" ]] || [[ "$PREFIX" == */com.termux* ]]; then
+    IS_TERMUX=1
+    BYURU_CONFIG="${BYURU_CONFIG:-$PREFIX/etc/byuru/byuru.conf}"
+    BYURU_PIDFILE="${BYURU_PIDFILE:-$PREFIX/var/run/byuru.pid}"
+    BYURU_LOGDIR="${BYURU_LOGDIR:-$PREFIX/var/log/byuru}"
+    BYURU_ROOT="${BYURU_ROOT:-$PREFIX/share/nginx/html}"
+else
+    IS_TERMUX=0
+fi
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+BOLD='\033[1m'
+
+log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
+log_ok() { echo -e "${GREEN}[OK]${NC} $1"; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+
+print_banner() {
+    echo -e "${CYAN}"
+    cat <<'EOF'
+    _                       
+   | |__  _   _ _ __ _   _  
+   | '_ \| | | | '__| | | | 
+   | |_) | |_| | |  | |_| | 
+   |_.__/ \__, |_|   \__, | 
+          |___/       |___/  
+EOF
+    echo -e "${NC}"
+    echo -e "${BOLD}byuructl v1.0.0${NC} - Control your byuru server"
+    echo ""
+}
+
+check_byuru_bin() {
+    if [[ -z "$BYURU_BIN" ]] || [[ ! -f "$BYURU_BIN" ]]; then
+        for path in "./byuru" "$HOME/.local/bin/byuru" "$HOME/bin/byuru" "/usr/local/bin/byuru" "/usr/bin/byuru" "$PREFIX/bin/byuru" "/data/data/com.termux/files/usr/bin/byuru"; do
+            if [[ -f "$path" ]]; then
+                BYURU_BIN="$path"
+                break
+            fi
+        done
+    fi
+    if [[ -z "$BYURU_BIN" ]] || [[ ! -f "$BYURU_BIN" ]]; then
+        log_error "byuru binary not found!"
+        log_info "Install byuru to one of these paths:"
+        echo "  - /usr/local/bin/byuru"
+        echo "  - $HOME/.local/bin/byuru"
+        echo "  - ./byuru (current directory)"
+        echo "  - Or set BYURU_BIN environment variable"
+        exit 1
+    fi
+    if [[ ! -x "$BYURU_BIN" ]]; then
+        log_warn "byuru binary is not executable. Fixing..."
+        chmod +x "$BYURU_BIN"
+    fi
+}
+
+get_pid() {
+    if [[ -f "$BYURU_PIDFILE" ]]; then
+        cat "$BYURU_PIDFILE" 2>/dev/null || echo ""
+    else
+        echo ""
+    fi
+}
+
+is_running() {
+    local pid=$(get_pid)
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
+ensure_dirs() {
+    local dirs=("$BYURU_LOGDIR" "$(dirname "$BYURU_PIDFILE")")
+    for dir in "${dirs[@]}"; do
+        if [[ ! -d "$dir" ]]; then
+            mkdir -p "$dir" 2>/dev/null || {
+                log_warn "Cannot create $dir (permission denied)"
+                if [[ "$dir" == /var/* ]] || [[ "$dir" == /etc/* ]]; then
+                    local fallback="$HOME/.byuru$(echo "$dir" | sed 's|^/var||;s|^/etc||')"
+                    mkdir -p "$fallback"
+                    if [[ "$dir" == "$(dirname "$BYURU_PIDFILE")" ]]; then
+                        BYURU_PIDFILE="$fallback/byuru.pid"
+                    fi
+                    if [[ "$dir" == "$BYURU_LOGDIR" ]]; then
+                        BYURU_LOGDIR="$fallback"
+                    fi
+                    log_info "Using fallback: $fallback"
+                fi
+            }
+        fi
+    done
+}
+
+cmd_start() {
+    print_banner
+    if is_running; then
+        local pid=$(get_pid)
+        log_warn "byuru is already running (PID: $pid)"
+        echo "Use 'byuru reload' to restart or 'byuru stop' to stop."
+        exit 1
+    fi
+    check_byuru_bin
+    ensure_dirs
+    if [[ ! -f "$BYURU_CONFIG" ]]; then
+        log_warn "Config not found at $BYURU_CONFIG"
+        log_info "Creating default configuration..."
+        mkdir -p "$(dirname "$BYURU_CONFIG")"
+        local config_root="$BYURU_ROOT"
+        local config_logdir="$BYURU_LOGDIR"
+        if [[ "$IS_TERMUX" == 1 ]]; then
+            config_root="$PREFIX/share/nginx/html"
+            config_logdir="$PREFIX/var/log/byuru"
+        fi
+        cat > "$BYURU_CONFIG" <<EOF
+worker_processes auto;
+worker_connections 1024;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    access_log ${config_logdir}/access.log;
+    error_log ${config_logdir}/error.log;
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    keepalive_timeout 65;
+    gzip on;
+    gzip_types text/plain text/css application/json application/javascript;
+    gzip_min_length 1000;
+
+    server {
+        listen ${BYURU_PORT};
+        server_name localhost;
+        root ${config_root};
+        index index.html index.htm;
+        location / {
+            try_files \$uri \$uri/ =404;
+        }
+        error_page 404 /404.html;
+        error_page 500 502 503 504 /50x.html;
+    }
+}
+EOF
+        log_ok "Default config created at $BYURU_CONFIG"
+    fi
+    if [[ ! -d "$BYURU_ROOT" ]]; then
+        mkdir -p "$BYURU_ROOT"
+    fi
+    if [[ ! -f "$BYURU_ROOT/index.html" ]]; then
+        cat > "$BYURU_ROOT/index.html" <<'EOF'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>byuru - It Works!</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);color:#fff;min-height:100vh;display:flex;align-items:center;justify-content:center;text-align:center}
+.container{padding:2rem}
+h1{font-size:4rem;margin-bottom:1rem;letter-spacing:-2px}
+h1 span{color:#00d4aa}
+p{font-size:1.2rem;color:#8892b0;margin-bottom:2rem}
+.badge{display:inline-block;background:rgba(0,212,170,0.1);border:1px solid #00d4aa;color:#00d4aa;padding:0.5rem 1rem;border-radius:20px;font-size:0.9rem;font-family:monospace}
+.links{margin-top:2rem}
+.links a{color:#00d4aa;text-decoration:none;margin:0 1rem;font-size:0.9rem}
+.footer{position:fixed;bottom:2rem;left:0;right:0;color:#555;font-size:0.85rem}
+</style>
+</head>
+<body>
+<div class="container">
+<h1>by<span>uru</span></h1>
+<p>Your lightweight HTTP server is running successfully!</p>
+<span class="badge">byuru/1.0.0</span>
+<div class="links">
+<a href="https://github.com/Ribco/byuru">GitHub</a>
+<a href="https://github.com/Ribco/byuru#configuration">Docs</a>
+</div>
+</div>
+<div class="footer">Powered by byuru &middot; Built for everyone, everywhere</div>
+</body>
+</html>
+EOF
+        log_ok "Default index.html created at $BYURU_ROOT/index.html"
+    fi
+    log_info "Testing configuration..."
+    if ! "$BYURU_BIN" -t -c "$BYURU_CONFIG" 2>/dev/null; then
+        log_error "Configuration test failed!"
+        log_info "Check your config: $BYURU_CONFIG"
+        exit 1
+    fi
+    log_ok "Configuration test passed"
+    log_info "Starting byuru..."
+    local start_cmd="$BYURU_BIN -c \"$BYURU_CONFIG\""
+    if [[ -n "$BYURU_USER" ]] && [[ "$(id -u)" == "0" ]]; then
+        start_cmd="su - $BYURU_USER -c '$start_cmd'"
+    fi
+    eval "$start_cmd" &
+    local pid=$!
+    echo "$pid" > "$BYURU_PIDFILE"
+    sleep 1
+    if kill -0 "$pid" 2>/dev/null; then
+        log_ok "byuru started successfully!"
+        echo ""
+        echo -e "  ${BOLD}PID:${NC}     $pid"
+        echo -e "  ${BOLD}Config:${NC}  $BYURU_CONFIG"
+        echo -e "  ${BOLD}Port:${NC}    $BYURU_PORT"
+        echo -e "  ${BOLD}Root:${NC}    $BYURU_ROOT"
+        echo -e "  ${BOLD}Logs:${NC}    $BYURU_LOGDIR"
+        echo ""
+        log_info "Visit http://localhost:$BYURU_PORT"
+    else
+        log_error "byuru failed to start!"
+        rm -f "$BYURU_PIDFILE"
+        exit 1
+    fi
+}
+
+cmd_stop() {
+    print_banner
+    if ! is_running; then
+        log_warn "byuru is not running"
+        rm -f "$BYURU_PIDFILE"
+        exit 0
+    fi
+    local pid=$(get_pid)
+    log_info "Stopping byuru (PID: $pid)..."
+    if kill -TERM "$pid" 2>/dev/null; then
+        local count=0
+        while is_running && [[ $count -lt 10 ]]; do
+            sleep 0.5
+            count=$((count + 1))
+        done
+    fi
+    if is_running; then
+        log_warn "Graceful shutdown failed, forcing..."
+        kill -KILL "$pid" 2>/dev/null || true
+        sleep 1
+    fi
+    rm -f "$BYURU_PIDFILE"
+    if ! is_running; then
+        log_ok "byuru stopped successfully"
+    else
+        log_error "Failed to stop byuru!"
+        exit 1
+    fi
+}
+
+cmd_reload() {
+    print_banner
+    if ! is_running; then
+        log_warn "byuru is not running, starting instead..."
+        cmd_start
+        return
+    fi
+    local pid=$(get_pid)
+    log_info "Reloading byuru (PID: $pid)..."
+    check_byuru_bin
+    log_info "Testing new configuration..."
+    if ! "$BYURU_BIN" -t -c "$BYURU_CONFIG" 2>/dev/null; then
+        log_error "New configuration is invalid! Aborting reload."
+        log_info "Current config is still active."
+        exit 1
+    fi
+    log_ok "Configuration test passed"
+    if kill -HUP "$pid" 2>/dev/null; then
+        log_ok "byuru reloaded successfully"
+    else
+        log_warn "Signal reload failed, performing full restart..."
+        cmd_stop
+        sleep 1
+        cmd_start
+    fi
+}
+
+cmd_restart() {
+    print_banner
+    log_info "Restarting byuru..."
+    cmd_stop
+    sleep 1
+    cmd_start
+}
+
+cmd_status() {
+    print_banner
+    if is_running; then
+        local pid=$(get_pid)
+        log_ok "byuru is ${BOLD}running${NC}"
+        echo ""
+        echo -e "  ${BOLD}PID:${NC}        $pid"
+        echo -e "  ${BOLD}Config:${NC}     $BYURU_CONFIG"
+        echo -e "  ${BOLD}PID file:${NC}   $BYURU_PIDFILE"
+        echo -e "  ${BOLD}Port:${NC}       $BYURU_PORT"
+        echo -e "  ${BOLD}Root:${NC}       $BYURU_ROOT"
+        echo -e "  ${BOLD}Binary:${NC}     $BYURU_BIN"
+        echo ""
+        if command -v ps >/dev/null 2>&1; then
+            echo -e "  ${BOLD}Process:${NC}"
+            ps -p "$pid" -o pid,ppid,pcpu,pmem,etime,comm 2>/dev/null | sed 's/^/    /'
+            echo ""
+        fi
+        if [[ -f "$BYURU_LOGDIR/error.log" ]]; then
+            echo -e "  ${BOLD}Recent errors:${NC}"
+            tail -n 3 "$BYURU_LOGDIR/error.log" 2>/dev/null | sed 's/^/    /' || echo "    (none)"
+            echo ""
+        fi
+        if command -v ss >/dev/null 2>&1; then
+            local port_info=$(ss -tlnp 2>/dev/null | grep ":$BYURU_PORT " || true)
+            if [[ -n "$port_info" ]]; then
+                echo -e "  ${BOLD}Port $BYURU_PORT:${NC} LISTENING"
+            fi
+        elif command -v netstat >/dev/null 2>&1; then
+            local port_info=$(netstat -tlnp 2>/dev/null | grep ":$BYURU_PORT " || true)
+            if [[ -n "$port_info" ]]; then
+                echo -e "  ${BOLD}Port $BYURU_PORT:${NC} LISTENING"
+            fi
+        fi
+    else
+        log_warn "byuru is ${BOLD}not running${NC}"
+        echo ""
+        echo -e "  ${BOLD}Config:${NC}     $BYURU_CONFIG"
+        echo -e "  ${BOLD}PID file:${NC}   $BYURU_PIDFILE"
+        echo -e "  ${BOLD}Port:${NC}       $BYURU_PORT"
+        echo ""
+        log_info "Start byuru with: byuructl start"
+    fi
+}
+
+cmd_test() {
+    print_banner
+    check_byuru_bin
+    log_info "Testing configuration..."
+    if "$BYURU_BIN" -t -c "$BYURU_CONFIG" 2>/dev/null; then
+        log_ok "Configuration is valid!"
+        echo ""
+        echo -e "  ${BOLD}Config:${NC} $BYURU_CONFIG"
+        echo -e "  ${BOLD}Port:${NC}   $BYURU_PORT"
+        echo -e "  ${BOLD}Root:${NC}   $BYURU_ROOT"
+    else
+        log_error "Configuration test failed!"
+        exit 1
+    fi
+}
+
+cmd_logs() {
+    print_banner
+    local log_type="${1:-access}"
+    local log_file
+    if [[ "$log_type" == "error" ]]; then
+        log_file="$BYURU_LOGDIR/error.log"
+    else
+        log_file="$BYURU_LOGDIR/access.log"
+    fi
+    if [[ ! -f "$log_file" ]]; then
+        log_warn "Log file not found: $log_file"
+        exit 1
+    fi
+    log_info "Tailing $log_type log (Ctrl+C to exit)..."
+    echo ""
+    tail -f "$log_file"
+}
+
+cmd_config() {
+    print_banner
+    if [[ ! -f "$BYURU_CONFIG" ]]; then
+        log_warn "Config not found at $BYURU_CONFIG"
+        log_info "Run 'byuru start' to create default config"
+        exit 1
+    fi
+    log_info "Current configuration ($BYURU_CONFIG):"
+    echo ""
+    cat "$BYURU_CONFIG"
+}
+
+cmd_edit() {
+    local editor="${EDITOR:-nano}"
+    if [[ ! -f "$BYURU_CONFIG" ]]; then
+        log_warn "Config not found, creating..."
+        mkdir -p "$(dirname "$BYURU_CONFIG")"
+    fi
+    if command -v "$editor" >/dev/null 2>&1; then
+        "$editor" "$BYURU_CONFIG"
+    else
+        log_error "Editor '$editor' not found. Set EDITOR environment variable."
+        exit 1
+    fi
+}
+
+cmd_install() {
+    print_banner
+    check_byuru_bin
+    log_info "Installing byuru system-wide..."
+    local install_dir="/usr/local/bin"
+    if [[ "$IS_TERMUX" == 1 ]]; then
+        install_dir="$PREFIX/bin"
+    elif [[ ! -w "$install_dir" ]]; then
+        install_dir="$HOME/.local/bin"
+        mkdir -p "$install_dir"
+    fi
+    if [[ "$BYURU_BIN" != "$install_dir/byuru" ]]; then
+        cp "$BYURU_BIN" "$install_dir/byuru"
+        chmod +x "$install_dir/byuru"
+        log_ok "byuru installed to $install_dir/byuru"
+    fi
+    local wrapper_src="${BASH_SOURCE[0]}"
+    if [[ -f "$wrapper_src" ]]; then
+        cp "$wrapper_src" "$install_dir/byuructl"
+        chmod +x "$install_dir/byuructl"
+        log_ok "byuructl installed to $install_dir/byuructl"
+    fi
+    for cmd in start stop restart reload status; do
+        ln -sf "$install_dir/byuructl" "$install_dir/byuru-$cmd" 2>/dev/null || true
+    done
+    local config_dir
+    if [[ "$IS_TERMUX" == 1 ]]; then
+        config_dir="$PREFIX/etc/byuru"
+    else
+        config_dir="/etc/byuru"
+    fi
+    mkdir -p "$config_dir"
+    local log_dir
+    if [[ "$IS_TERMUX" == 1 ]]; then
+        log_dir="$PREFIX/var/log/byuru"
+    else
+        log_dir="/var/log/byuru"
+    fi
+    mkdir -p "$log_dir"
+    echo ""
+    log_ok "Installation complete!"
+    echo -e "  ${BOLD}Binary:${NC}    $install_dir/byuru"
+    echo -e "  ${BOLD}Control:${NC}   $install_dir/byuructl"
+    echo -e "  ${BOLD}Config:${NC}    $config_dir/byuru.conf"
+    echo -e "  ${BOLD}Logs:${NC}      $log_dir/"
+    echo ""
+    log_info "Start byuru: byuructl start"
+    if [[ ":$PATH:" != *":$install_dir:"* ]]; then
+        log_warn "$install_dir is not in your PATH"
+        echo "Add this to your shell profile:"
+        echo "  export PATH=\"\$PATH:$install_dir\""
+    fi
+}
+
+cmd_uninstall() {
+    print_banner
+    log_warn "This will remove byuru from your system!"
+    read -p "Are you sure? [y/N] " -n 1 -r
+    echo ""
+    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+        log_info "Uninstall cancelled"
+        exit 0
+    fi
+    cmd_stop 2>/dev/null || true
+    local install_dir="/usr/local/bin"
+    if [[ "$IS_TERMUX" == 1 ]]; then
+        install_dir="$PREFIX/bin"
+    elif [[ ! -w "$install_dir" ]]; then
+        install_dir="$HOME/.local/bin"
+    fi
+    rm -f "$install_dir/byuru"
+    rm -f "$install_dir/byuructl"
+    rm -f "$install_dir/byuru-"{start,stop,restart,reload,status}
+    log_ok "byuru uninstalled"
+    log_info "Config and logs preserved. Remove manually if desired:"
+    echo "  - /etc/byuru/ or $PREFIX/etc/byuru/"
+    echo "  - /var/log/byuru/ or $PREFIX/var/log/byuru/"
+}
+
+cmd_help() {
+    print_banner
+    echo -e "${BOLD}Usage:${NC} byuructl <command> [options]"
+    echo ""
+    echo -e "${BOLD}Commands:${NC}"
+    echo ""
+    echo -e "  ${GREEN}start${NC}       Start the byuru server"
+    echo -e "  ${RED}stop${NC}        Stop the byuru server"
+    echo -e "  ${YELLOW}reload${NC}      Reload configuration gracefully"
+    echo -e "  ${CYAN}restart${NC}     Stop and start the server"
+    echo -e "  ${BLUE}status${NC}      Show server status and info"
+    echo -e "  ${BLUE}test${NC}        Test configuration syntax"
+    echo -e "  ${BLUE}logs${NC}        Tail access logs (use 'error' for error logs)"
+    echo -e "  ${BLUE}config${NC}      Display current configuration"
+    echo -e "  ${BLUE}edit${NC}        Edit configuration in your \$EDITOR"
+    echo -e "  ${GREEN}install${NC}     Install byuru system-wide"
+    echo -e "  ${RED}uninstall${NC}   Remove byuru from system"
+    echo -e "  ${BLUE}help${NC}        Show this help message"
+    echo ""
+    echo -e "${BOLD}Environment Variables:${NC}"
+    echo ""
+    echo -e "  BYURU_BIN       Path to byuru binary"
+    echo -e "  BYURU_CONFIG    Path to config file"
+    echo -e "  BYURU_PIDFILE   Path to PID file"
+    echo -e "  BYURU_LOGDIR    Path to log directory"
+    echo -e "  BYURU_PORT      Default port (default: 8080)"
+    echo -e "  BYURU_ROOT      Document root (default: /var/www/html)"
+    echo -e "  BYURU_USER      User to run as (requires root)"
+    echo ""
+    echo -e "${BOLD}Examples:${NC}"
+    echo ""
+    echo "  byuructl start                    # Start server"
+    echo "  byuructl reload                   # Reload config"
+    echo "  byuructl logs error               # Tail error logs"
+    echo "  BYURU_PORT=9000 byuructl start    # Start on custom port"
+    echo ""
+}
+
+main() {
+    local command="${1:-help}"
+    case "$command" in
+        start) cmd_start ;;
+        stop) cmd_stop ;;
+        reload) cmd_reload ;;
+        restart) cmd_restart ;;
+        status) cmd_status ;;
+        test|check) cmd_test ;;
+        logs) cmd_logs "$2" ;;
+        config|show) cmd_config ;;
+        edit) cmd_edit ;;
+        install) cmd_install ;;
+        uninstall|remove) cmd_uninstall ;;
+        help|--help|-h|""|*) cmd_help ;;
+    esac
+}
+
+main "$@"
+

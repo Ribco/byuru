@@ -1,0 +1,746 @@
+#!/bin/bash
+# byuructl - Control script for byuru HTTP server
+# Version: 1.0.0
+
+set -e
+
+BYURU_BIN="${BYURU_BIN:-$(which byuru 2>/dev/null || echo "")}"
+BYURU_CONFIG="${BYURU_CONFIG:-/etc/byuru/byuru.conf}"
+BYURU_PIDFILE="${BYURU_PIDFILE:-/var/run/byuru.pid}"
+BYURU_LOGDIR="${BYURU_LOGDIR:-/var/log/byuru}"
+BYURU_USER="${BYURU_USER:-}"
+BYURU_PORT="${BYURU_PORT:-8080}"
+BYURU_ROOT="${BYURU_ROOT:-/var/www/html}"
+
+if [[ -n "$TERMUX_VERSION" ]] || [[ "$PREFIX" == */com.termux* ]]; then
+    IS_TERMUX=1
+    BYURU_CONFIG="${BYURU_CONFIG:-$PREFIX/etc/byuru/byuru.conf}"
+    BYURU_PIDFILE="${BYURU_PIDFILE:-$PREFIX/var/run/byuru.pid}"
+    BYURU_LOGDIR="${BYURU_LOGDIR:-$PREFIX/var/log/byuru}"
+    BYURU_ROOT="${BYURU_ROOT:-$PREFIX/share/nginx/html}"
+else
+    IS_TERMUX=0
+fi
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+BOLD='\033[1m'
+
+log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
+log_ok() { echo -e "${GREEN}[OK]${NC} $1"; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
+log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+
+print_banner() {
+    echo -e "${CYAN}"
+    cat <<'EOF'
+    _                       
+   | |__  _   _ _ __ _   _  
+   | '_ \| | | | '__| | | | 
+   | |_) | |_| | |  | |_| | 
+   |_.__/ \__, |_|   \__, | 
+          |___/       |___/  
+EOF
+    echo -e "${NC}"
+    echo -e "${BOLD}byuructl v1.0.0${NC} - Control your byuru server"
+    echo ""
+}
+
+check_byuru_bin() {
+    if [[ -z "$BYURU_BIN" ]] || [[ ! -f "$BYURU_BIN" ]]; then
+        for path in "./byuru" "$HOME/.local/bin/byuru" "$HOME/bin/byuru" "/usr/local/bin/byuru" "/usr/bin/byuru" "$PREFIX/bin/byuru" "/data/data/com.termux/files/usr/bin/byuru"; do
+            if [[ -f "$path" ]]; then
+                BYURU_BIN="$path"
+                break
+            fi
+        done
+    fi
+    if [[ -z "$BYURU_BIN" ]] || [[ ! -f "$BYURU_BIN" ]]; then
+        log_error "byuru binary not found!"
+        log_info "Install byuru to one of these paths:"
+        echo "  - /usr/local/bin/byuru"
+        echo "  - $HOME/.local/bin/byuru"
+        echo "  - ./byuru (current directory)"
+        echo "  - Or set BYURU_BIN environment variable"
+        exit 1
+    fi
+    if [[ ! -x "$BYURU_BIN" ]]; then
+        log_warn "byuru binary is not executable. Fixing..."
+        chmod +x "$BYURU_BIN"
+    fi
+}
+
+get_pid() {
+    if [[ -f "$BYURU_PIDFILE" ]]; then
+        cat "$BYURU_PIDFILE" 2>/dev/null || echo ""
+    else
+        echo ""
+    fi
+}
+
+is_running() {
+    local pid=$(get_pid)
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
+ensure_dirs() {
+    local dirs=("$BYURU_LOGDIR" "$(dirname "$BYURU_PIDFILE")")
+    for dir in "${dirs[@]}"; do
+        if [[ ! -d "$dir" ]]; then
+            mkdir -p "$dir" 2>/dev/null || {
+                log_warn "Cannot create $dir (permission denied)"
+                if [[ "$dir" == /var/* ]] || [[ "$dir" == /etc/* ]]; then
+                    local fallback="$HOME/.byuru$(echo "$dir" | sed 's|^/var||;s|^/etc||')"
+                    mkdir -p "$fallback"
+                    if [[ "$dir" == "$(dirname "$BYURU_PIDFILE")" ]]; then
+                        BYURU_PIDFILE="$fallback/byuru.pid"
+                    fi
+                    if [[ "$dir" == "$BYURU_LOGDIR" ]]; then
+                        BYURU_LOGDIR="$fallback"
+                    fi
+                    log_info "Using fallback: $fallback"
+                fi
+            }
+        fi
+    done
+}
+
+class Logger:
+    def __init__(self, access_log=None, error_log=None):
+        self.access_log_path = access_log
+        self.error_log_path = error_log
+        self.access_file = None
+        self.error_file = None
+
+    def open_logs(self):
+        if self.access_log_path:
+            os.makedirs(os.path.dirname(self.access_log_path), exist_ok=True)
+            self.access_file = open(self.access_log_path, 'a')
+        if self.error_log_path:
+            os.makedirs(os.path.dirname(self.error_log_path), exist_ok=True)
+            self.error_file = open(self.error_log_path, 'a')
+
+    def close_logs(self):
+        if self.access_file:
+            self.access_file.close()
+        if self.error_file:
+            self.error_file.close()
+
+    def access(self, client_ip, method, path, status, bytes_sent, user_agent='-'):
+        timestamp = datetime.now().strftime('%d/%b/%Y:%H:%M:%S %z')
+        line = f'{client_ip} - - [{timestamp}] "{method} {path} HTTP/1.1" {status} {bytes_sent} "-" "{user_agent}"\n'
+        print(line.strip())
+        if self.access_file:
+            self.access_file.write(line)
+            self.access_file.flush()
+
+    def error(self, message):
+        timestamp = datetime.now().strftime('%Y/%m/%d %H:%M:%S')
+        line = f'[{timestamp}] [error] {message}\n'
+        print(line.strip(), file=sys.stderr)
+        if self.error_file:
+            self.error_file.write(line)
+            self.error_file.flush()
+
+    def info(self, message):
+        timestamp = datetime.now().strftime('%Y/%m/%d %H:%M:%S')
+        line = f'[{timestamp}] [info] {message}\n'
+        print(line.strip())
+
+
+class RateLimiter:
+    def __init__(self, rate=10, per=1, burst=20):
+        self.rate = rate
+        self.per = per
+        self.burst = burst
+        self.clients = {}
+        self.lock = threading.Lock()
+
+    def is_allowed(self, client_ip):
+        with self.lock:
+            now = time.time()
+            if client_ip not in self.clients:
+                self.clients[client_ip] = {'tokens': self.burst, 'last_update': now}
+            client = self.clients[client_ip]
+            elapsed = now - client['last_update']
+            client['tokens'] = min(self.burst, client['tokens'] + elapsed * (self.rate / self.per))
+            client['last_update'] = now
+            if client['tokens'] >= 1:
+                client['tokens'] -= 1
+                return True
+            return False
+
+    def cleanup(self):
+        with self.lock:
+            now = time.time()
+            stale = [ip for ip, data in self.clients.items() if now - data['last_update'] > 60]
+            for ip in stale:
+                del self.clients[ip]
+
+class ConfigParser:
+    def __init__(self, config_text):
+        self.config_text = config_text
+        self.tokens = self._tokenize()
+        self.pos = 0
+        self.config = {}
+
+    def _tokenize(self):
+        text = self.config_text
+        tokens = []
+        i = 0
+        while i < len(text):
+            if text[i].isspace():
+                i += 1
+                continue
+            if text[i] == '#':
+                while i < len(text) and text[i] != '\n':
+                    i += 1
+                continue
+            if text[i] in '{};':
+                tokens.append(text[i])
+                i += 1
+                continue
+            if text[i] == '"':
+                j = i + 1
+                while j < len(text) and text[j] != '"':
+                    j += 1
+                tokens.append(text[i:j+1])
+                i = j + 1
+                continue
+            j = i
+            while j < len(text) and not text[j].isspace() and text[j] not in '{};#"':
+                j += 1
+            if j > i:
+                tokens.append(text[i:j])
+            i = j
+        return tokens
+
+    def parse(self):
+        while self.pos < len(self.tokens):
+            self._parse_statement(self.config)
+        return self.config
+
+    def _parse_statement(self, ctx):
+        if self.pos >= len(self.tokens):
+            return
+        key = self._current()
+        self.pos += 1
+        if key in ('events', 'http', 'server', 'location'):
+            name = None
+            if self._current() != '{':
+                name = self._current()
+                self.pos += 1
+            self._expect('{')
+            block = {}
+            while self._current() != '}':
+                self._parse_statement(block)
+            self._expect('}')
+            if key not in ctx:
+                ctx[key] = []
+            ctx[key].append({'name': name, 'config': block})
+        else:
+            values = []
+            while self.pos < len(self.tokens) and self._current() != ';':
+                val = self._current()
+                if val.startswith('"') and val.endswith('"'):
+                    val = val[1:-1]
+                values.append(val)
+                self.pos += 1
+            self._expect(';')
+            ctx[key] = values
+
+    def _current(self):
+        if self.pos < len(self.tokens):
+            return self.tokens[self.pos]
+        return None
+
+    def _expect(self, token):
+        if self._current() != token:
+            raise ValueError(f"Expected {token}, got {self._current()}")
+        self.pos += 1
+
+class HTTPRequest:
+    def __init__(self):
+        self.method = ''
+        self.path = ''
+        self.version = ''
+        self.headers = {}
+        self.body = b''
+        self.query_string = ''
+        self.client_ip = ''
+
+    @classmethod
+    def parse(cls, data, client_ip):
+        req = cls()
+        req.client_ip = client_ip
+        try:
+            header_end = data.find(b'\r\n\r\n')
+            if header_end == -1:
+                header_end = data.find(b'\n\n')
+                if header_end == -1:
+                    return None
+                header_data = data[:header_end].decode('utf-8', errors='replace')
+                req.body = data[header_end + 2:]
+            else:
+                header_data = data[:header_end].decode('utf-8', errors='replace')
+                req.body = data[header_end + 4:]
+            lines = header_data.split('\r\n')
+            if len(lines) == 1:
+                lines = header_data.split('\n')
+            request_line = lines[0]
+            parts = request_line.split()
+            if len(parts) >= 2:
+                req.method = parts[0]
+                req.path = parts[1]
+                req.version = parts[2] if len(parts) > 2 else 'HTTP/1.1'
+            if '?' in req.path:
+                req.path, req.query_string = req.path.split('?', 1)
+            for line in lines[1:]:
+                if ':' in line:
+                    key, value = line.split(':', 1)
+                    req.headers[key.strip().lower()] = value.strip()
+            return req
+        except Exception:
+            return None
+
+
+class HTTPResponse:
+    def __init__(self, status=200, body=b'', headers=None):
+        self.status = status
+        self.body = body
+        self.headers = headers or {}
+        self.headers.setdefault('Server', f'byuru/{__version__}')
+        self.headers.setdefault('Date', datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT'))
+
+    def to_bytes(self):
+        status_text = HTTP_STATUS.get(self.status, 'Unknown')
+        lines = [f'HTTP/1.1 {self.status} {status_text}']
+        for key, value in self.headers.items():
+            lines.append(f'{key}: {value}')
+        lines.append('')
+        header = '\r\n'.join(lines).encode('utf-8')
+        return header + b'\r\n' + self.body
+
+    @classmethod
+    def redirect(cls, location, status=302):
+        return cls(status=status, headers={'Location': location})
+
+    @classmethod
+    def json(cls, data, status=200):
+        body = json.dumps(data).encode('utf-8')
+        headers = {'Content-Type': 'application/json', 'Content-Length': str(len(body))}
+        return cls(status=status, body=body, headers=headers)
+
+    @classmethod
+    def text(cls, text, status=200, content_type='text/plain'):
+        body = text.encode('utf-8')
+        headers = {'Content-Type': content_type, 'Content-Length': str(len(body))}
+        return cls(status=status, body=body, headers=headers)
+
+    @classmethod
+    def html(cls, html_text, status=200):
+        return cls.text(html_text, status, 'text/html')
+
+class StaticFileHandler:
+    def __init__(self, root, index_files=None, autoindex=False):
+        self.root = os.path.abspath(root)
+        self.index_files = index_files or ['index.html', 'index.htm']
+        self.autoindex = autoindex
+
+    def handle(self, path):
+        safe_path = urllib.parse.unquote(path)
+        safe_path = os.path.normpath(safe_path)
+        if safe_path.startswith('..'):
+            return HTTPResponse(403, body=b'Forbidden')
+        file_path = os.path.join(self.root, safe_path.lstrip('/'))
+        file_path = os.path.abspath(file_path)
+        if not file_path.startswith(self.root):
+            return HTTPResponse(403, body=b'Forbidden')
+        if os.path.isdir(file_path):
+            for index in self.index_files:
+                index_path = os.path.join(file_path, index)
+                if os.path.isfile(index_path):
+                    return self._serve_file(index_path)
+            if self.autoindex:
+                return self._autoindex(file_path, safe_path)
+            return HTTPResponse(403, body=b'Forbidden')
+        if os.path.isfile(file_path):
+            return self._serve_file(file_path)
+        return HTTPResponse(404, body=b'Not Found')
+
+    def _serve_file(self, file_path):
+        ext = os.path.splitext(file_path)[1].lower()
+        content_type = MIME_TYPES.get(ext, 'application/octet-stream')
+        try:
+            with open(file_path, 'rb') as f:
+                body = f.read()
+            headers = {
+                'Content-Type': content_type,
+                'Content-Length': str(len(body)),
+                'Last-Modified': datetime.fromtimestamp(os.path.getmtime(file_path)).strftime('%a, %d %b %Y %H:%M:%S GMT'),
+            }
+            import hashlib
+            etag = hashlib.md5(body).hexdigest()[:16]
+            headers['ETag'] = f'"{etag}"'
+            return HTTPResponse(200, body=body, headers=headers)
+        except Exception as e:
+            return HTTPResponse(500, body=f'Error: {e}'.encode())
+
+    def _autoindex(self, dir_path, url_path):
+        try:
+            entries = os.listdir(dir_path)
+            entries.sort()
+            html = f'<!DOCTYPE html><html><head><title>Index of {url_path}</title></head><body><h1>Index of {url_path}</h1><hr><pre>'
+            if url_path != '/':
+                html += '<a href="../">../</a>\n'
+            for entry in entries:
+                full_path = os.path.join(dir_path, entry)
+                if os.path.isdir(full_path):
+                    entry += '/'
+                html += f'<a href="{entry}">{entry}</a>\n'
+            html += '</pre><hr></body></html>'
+            return HTTPResponse.html(html)
+        except Exception:
+            return HTTPResponse(403, body=b'Forbidden')
+
+class ReverseProxy:
+    def __init__(self, upstream, timeout=60):
+        self.upstream = upstream
+        self.timeout = timeout
+
+    def handle(self, request):
+        try:
+            upstream_url = urllib.parse.urlparse(self.upstream)
+            host = upstream_url.hostname or '127.0.0.1'
+            port = upstream_url.port or 80
+            proxy_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            proxy_socket.settimeout(self.timeout)
+            proxy_socket.connect((host, port))
+            proxy_path = request.path
+            if request.query_string:
+                proxy_path += '?' + request.query_string
+            proxy_request = f"{request.method} {proxy_path} HTTP/1.1\r\n"
+            for key, value in request.headers.items():
+                if key.lower() not in ('host', 'connection'):
+                    proxy_request += f"{key}: {value}\r\n"
+            proxy_request += f"Host: {host}:{port}\r\n"
+            proxy_request += f"X-Real-IP: {request.client_ip}\r\n"
+            proxy_request += f"X-Forwarded-For: {request.client_ip}\r\n"
+            proxy_request += "Connection: close\r\n\r\n"
+            proxy_socket.sendall(proxy_request.encode())
+            if request.body:
+                proxy_socket.sendall(request.body)
+            response_data = b''
+            while True:
+                try:
+                    chunk = proxy_socket.recv(8192)
+                    if not chunk:
+                        break
+                    response_data += chunk
+                except socket.timeout:
+                    break
+            proxy_socket.close()
+            if not response_data:
+                return HTTPResponse(502, body=b'Bad Gateway')
+            header_end = response_data.find(b'\r\n\r\n')
+            if header_end == -1:
+                header_end = response_data.find(b'\n\n')
+            if header_end != -1:
+                body = response_data[header_end + 4:]
+            else:
+                body = b''
+            return HTTPResponse(200, body=body)
+        except Exception as e:
+            return HTTPResponse(502, body=f'Bad Gateway: {e}'.encode())
+
+
+class LoadBalancer:
+    ROUND_ROBIN = 'round_robin'
+    LEAST_CONN = 'least_conn'
+    IP_HASH = 'ip_hash'
+
+    def __init__(self, upstreams, method=ROUND_ROBIN):
+        self.upstreams = upstreams
+        self.method = method
+        self.current = 0
+        self.connections = {u: 0 for u in upstreams}
+        self.lock = threading.Lock()
+
+    def get_backend(self, client_ip=None):
+        with self.lock:
+            if self.method == self.ROUND_ROBIN:
+                backend = self.upstreams[self.current % len(self.upstreams)]
+                self.current += 1
+                return backend
+            elif self.method == self.LEAST_CONN:
+                backend = min(self.connections, key=self.connections.get)
+                self.connections[backend] += 1
+                return backend
+            elif self.method == self.IP_HASH:
+                import hashlib
+                h = hashlib.md5(client_ip.encode()).hexdigest()
+                idx = int(h, 16) % len(self.upstreams)
+                return self.upstreams[idx]
+            return self.upstreams[0]
+
+    def release(self, backend):
+        with self.lock:
+            if backend in self.connections:
+                self.connections[backend] = max(0, self.connections[backend] - 1)
+
+class ServerBlock:
+    def __init__(self, config, logger):
+        self.config = config
+        self.logger = logger
+        self.listen_port = 8080
+        self.server_names = []
+        self.root = '/var/www/html'
+        self.index_files = ['index.html', 'index.htm']
+        self.locations = []
+        self.error_pages = {}
+        self.rate_limiter = None
+        self.autoindex = False
+        self._parse_config()
+
+    def _parse_config(self):
+        cfg = self.config.get('config', {})
+        if 'listen' in cfg:
+            self.listen_port = int(cfg['listen'][0])
+        if 'server_name' in cfg:
+            self.server_names = cfg['server_name']
+        if 'root' in cfg:
+            self.root = cfg['root'][0]
+        if 'index' in cfg:
+            self.index_files = cfg['index']
+        if 'autoindex' in cfg:
+            self.autoindex = cfg['autoindex'][0].lower() == 'on'
+        if 'location' in cfg:
+            for loc in cfg['location']:
+                self.locations.append({'path': loc['name'], 'config': loc['config']})
+        if 'limit_req' in cfg or 'limit_req_zone' in cfg:
+            self.rate_limiter = RateLimiter(rate=10, per=1, burst=20)
+
+    def handle_request(self, request):
+        if self.rate_limiter and not self.rate_limiter.is_allowed(request.client_ip):
+            return HTTPResponse(429, body=b'Too Many Requests')
+        for loc in self.locations:
+            path = loc['path']
+            loc_cfg = loc['config']
+            if self._match_location(request.path, path):
+                if 'proxy_pass' in loc_cfg:
+                    proxy = ReverseProxy(loc_cfg['proxy_pass'][0])
+                    return proxy.handle(request)
+                elif 'return' in loc_cfg:
+                    code = int(loc_cfg['return'][0])
+                    return HTTPResponse(status=code, body=b'')
+                elif 'try_files' in loc_cfg:
+                    return self._try_files(request, loc_cfg['try_files'])
+        handler = StaticFileHandler(self.root, self.index_files, self.autoindex)
+        return handler.handle(request.path)
+
+    def _match_location(self, request_path, location_path):
+        if location_path == '= /':
+            return request_path == '/'
+        if location_path.startswith('~ '):
+            pattern = location_path[2:]
+            return re.search(pattern, request_path) is not None
+        if location_path.startswith('~* '):
+            pattern = location_path[3:]
+            return re.search(pattern, request_path, re.IGNORECASE) is not None
+        return request_path.startswith(location_path.rstrip('/'))
+
+    def _try_files(self, request, files):
+        handler = StaticFileHandler(self.root, self.index_files)
+        for f in files:
+            if f == '=404':
+                return HTTPResponse(404, body=b'Not Found')
+            test_path = f.replace('$uri', request.path)
+            result = handler.handle(test_path)
+            if result.status != 404:
+                return result
+        return HTTPResponse(404, body=b'Not Found')
+
+class ByuruServer:
+    def __init__(self, config_path=None):
+        self.config_path = config_path
+        self.config = {}
+        self.servers = []
+        self.logger = Logger()
+        self.running = False
+        self.server_socket = None
+        self.worker_threads = []
+        self.max_workers = 4
+
+    def load_config(self, config_text=None):
+        if config_text:
+            parser = ConfigParser(config_text)
+        elif self.config_path and os.path.exists(self.config_path):
+            with open(self.config_path, 'r') as f:
+                parser = ConfigParser(f.read())
+        else:
+            parser = ConfigParser(DEFAULT_CONFIG)
+        self.config = parser.parse()
+        if 'worker_processes' in self.config:
+            wp = self.config['worker_processes'][0]
+            if wp == 'auto':
+                self.max_workers = os.cpu_count() or 4
+            else:
+                self.max_workers = int(wp)
+        if 'http' in self.config:
+            http_cfg = self.config['http'][0]['config']
+            access_log = http_cfg.get('access_log', ['/var/log/byuru/access.log'])[0]
+            error_log = http_cfg.get('error_log', ['/var/log/byuru/error.log'])[0]
+            self.logger = Logger(access_log, error_log)
+            if 'server' in http_cfg:
+                for srv in http_cfg['server']:
+                    self.servers.append(ServerBlock(srv, self.logger))
+        if not self.servers:
+            self.servers.append(ServerBlock({'config': {}}, self.logger))
+
+    def start(self):
+        self.running = True
+        self.logger.open_logs()
+        self.logger.info(f"byuru/{__version__} starting...")
+        for server in self.servers:
+            self._start_server(server)
+        self.logger.info("byuru started successfully")
+        try:
+            while self.running:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            self.stop()
+
+    def _start_server(self, server_block):
+        port = server_block.listen_port
+        try:
+            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            self.server_socket.bind(('0.0.0.0', port))
+            self.server_socket.listen(128)
+            self.logger.info(f"Listening on 0.0.0.0:{port}")
+        except Exception as e:
+            self.logger.error(f"Failed to bind to port {port}: {e}")
+            return
+        for i in range(self.max_workers):
+            t = threading.Thread(target=self._worker, args=(server_block, i))
+            t.daemon = True
+            t.start()
+            self.worker_threads.append(t)
+
+    def _worker(self, server_block, worker_id):
+        self.logger.info(f"Worker {worker_id} started")
+        while self.running:
+            try:
+                ready, _, _ = select.select([self.server_socket], [], [], 1.0)
+                if not ready:
+                    continue
+                client_socket, client_addr = self.server_socket.accept()
+                self._handle_client(client_socket, client_addr, server_block)
+            except Exception as e:
+                if self.running:
+                    self.logger.error(f"Worker {worker_id} error: {e}")
+
+    def _handle_client(self, client_socket, client_addr, server_block):
+        try:
+            client_socket.settimeout(30)
+            data = b''
+            while True:
+                chunk = client_socket.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+                if b'\r\n\r\n' in data or b'\n\n' in data:
+                    break
+            if not data:
+                client_socket.close()
+                return
+            request = HTTPRequest.parse(data, client_addr[0])
+            if not request:
+                client_socket.close()
+                return
+            response = server_block.handle_request(request)
+            user_agent = request.headers.get('user-agent', '-')
+            self.logger.access(request.client_ip, request.method, request.path, response.status, len(response.body), user_agent)
+            client_socket.sendall(response.to_bytes())
+            client_socket.close()
+        except Exception as e:
+            self.logger.error(f"Client handler error: {e}")
+            try:
+                client_socket.close()
+            except:
+                pass
+
+    def stop(self):
+        self.running = False
+        self.logger.info("Shutting down byuru...")
+        if self.server_socket:
+            self.server_socket.close()
+        for t in self.worker_threads:
+            t.join(timeout=2)
+        self.logger.close_logs()
+        print("byuru stopped.")
+
+
+def print_banner():
+    print("""
+    _                       
+   | |__  _   _ _ __ _   _  
+   | '_ \| | | | '__| | | | 
+   | |_) | |_| | |  | |_| | 
+   |_.__/ \__, |_|   \__, | 
+          |___/       |___/  
+    byuru v1.0.0 - Lightweight HTTP Server & Reverse Proxy
+    """)
+
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(description='byuru - Lightweight HTTP Server')
+    parser.add_argument('-c', '--config', help='Path to configuration file')
+    parser.add_argument('-p', '--port', type=int, default=8080, help='Port to listen on')
+    parser.add_argument('-r', '--root', default='./www', help='Document root')
+    parser.add_argument('-t', '--test', action='store_true', help='Test configuration')
+    parser.add_argument('-v', '--version', action='version', version=f'byuru/{__version__}')
+    args = parser.parse_args()
+    print_banner()
+    if args.test:
+        print("Testing configuration...")
+        server = ByuruServer(args.config)
+        server.load_config()
+        print("Configuration test successful!")
+        return
+    if not args.config:
+        quick_config = f"""
+        http {{
+            server {{
+                listen {args.port};
+                root {args.root};
+                index index.html;
+                location / {{
+                    try_files $uri $uri/ =404;
+                }}
+            }}
+        }}
+        """
+        os.makedirs(args.root, exist_ok=True)
+        index_path = os.path.join(args.root, 'index.html')
+        if not os.path.exists(index_path):
+            with open(index_path, 'w') as f:
+                f.write(f'<!DOCTYPE html><html><head><title>byuru</title></head><body><h1>byuru is running!</h1><p>byuru/{__version__}</p></body></html>')
+    else:
+        quick_config = None
+    server = ByuruServer(args.config)
+    server.load_config(quick_config)
+    server.start()
+
+
+if __name__ == '__main__':
+    main()
+
