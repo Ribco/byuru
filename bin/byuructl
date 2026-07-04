@@ -4,23 +4,30 @@
 
 set -e
 
-BYURU_BIN="${BYURU_BIN:-$(which byuru 2>/dev/null || echo "")}"
-BYURU_CONFIG="${BYURU_CONFIG:-/etc/byuru/byuru.conf}"
-BYURU_PIDFILE="${BYURU_PIDFILE:-/var/run/byuru.pid}"
-BYURU_LOGDIR="${BYURU_LOGDIR:-/var/log/byuru}"
-BYURU_USER="${BYURU_USER:-}"
-BYURU_PORT="${BYURU_PORT:-8080}"
-BYURU_ROOT="${BYURU_ROOT:-/var/www/html}"
-
+# Auto-detect Termux first
 if [[ -n "$TERMUX_VERSION" ]] || [[ "$PREFIX" == */com.termux* ]]; then
     IS_TERMUX=1
+else
+    IS_TERMUX=0
+fi
+
+# Set defaults based on platform
+if [[ "$IS_TERMUX" == 1 ]]; then
     BYURU_CONFIG="${BYURU_CONFIG:-$PREFIX/etc/byuru/byuru.conf}"
     BYURU_PIDFILE="${BYURU_PIDFILE:-$PREFIX/var/run/byuru.pid}"
     BYURU_LOGDIR="${BYURU_LOGDIR:-$PREFIX/var/log/byuru}"
     BYURU_ROOT="${BYURU_ROOT:-$PREFIX/share/nginx/html}"
 else
-    IS_TERMUX=0
+    BYURU_CONFIG="${BYURU_CONFIG:-/etc/byuru/byuru.conf}"
+    BYURU_PIDFILE="${BYURU_PIDFILE:-/var/run/byuru.pid}"
+    BYURU_LOGDIR="${BYURU_LOGDIR:-/var/log/byuru}"
+    BYURU_ROOT="${BYURU_ROOT:-/var/www/html}"
 fi
+
+BYURU_BIN="${BYURU_BIN:-$(which byuru 2>/dev/null || echo "")}"
+BYURU_USER="${BYURU_USER:-}"
+BYURU_PORT="${BYURU_PORT:-8080}"
+
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
