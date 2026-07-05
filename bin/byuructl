@@ -272,6 +272,10 @@ cmd_stop() {
         local count=0
         while is_running && [[ $count -lt 10 ]]; do
             sleep 0.5
+            for i in 1 2 3 4 5; do
+            pkill -9 -f byuru 2>/dev/null || true
+            sleep 0.3
+            done
             count=$((count + 1))
         done
     fi
@@ -280,6 +284,10 @@ cmd_stop() {
         kill -KILL "$pid" 2>/dev/null || true
         sleep 1
     fi
+for i in 1 2 3 4 5; do
+    pkill -9 -f byuru 2>/dev/null || true
+    sleep 0.3
+done
     rm -f "$BYURU_PIDFILE"
     if ! is_running; then
         log_ok "byuru stopped successfully"
