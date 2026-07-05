@@ -16,7 +16,7 @@ if [[ "$IS_TERMUX" == 1 ]]; then
     BYURU_CONFIG="${BYURU_CONFIG:-$PREFIX/etc/byuru/byuru.conf}"
     BYURU_PIDFILE="${BYURU_PIDFILE:-$PREFIX/var/run/byuru.pid}"
     BYURU_LOGDIR="${BYURU_LOGDIR:-$PREFIX/var/log/byuru}"
-    BYURU_ROOT="${BYURU_ROOT:-$PREFIX/share/nginx/html}"
+    BYURU_ROOT="${BYURU_ROOT:-$HOME/.byuru/www}"
 else
     BYURU_CONFIG="${BYURU_CONFIG:-/etc/byuru/byuru.conf}"
     BYURU_PIDFILE="${BYURU_PIDFILE:-/var/run/byuru.pid}"
@@ -45,12 +45,12 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 print_banner() {
     echo -e "${CYAN}"
     cat <<'EOF'
-    _                       
-   | |__  _   _ _ __ _   _  
-   | '_ \| | | | '__| | | | 
-   | |_) | |_| | |  | |_| | 
-   |_.__/ \__, |_|   \__, | 
-          |___/       |___/  
+    ___.                                 
+    \_ |__    ___.__.  __ __  _______   __ __ 
+     | __ \  <   |  | |  |  \ \_  __ \ |  |  \ 
+     | \_\ \  \___  | |  |  /  |  | \/ |  |  / 
+     |___  /  / ____| |____/   |__|    |____/  
+         \/   \/                              
 EOF
     echo -e "${NC}"
     echo -e "${BOLD}byuructl v1.0.0${NC} - Control your byuru server"
@@ -98,7 +98,7 @@ is_running() {
 }
 
 ensure_dirs() {
-    local dirs=("$BYURU_LOGDIR" "$(dirname "$BYURU_PIDFILE")")
+    local dirs=("$BYURU_LOGDIR" "$(dirname "$BYURU_PIDFILE")" "$BYURU_ROOT")
     for dir in "${dirs[@]}"; do
         if [[ ! -d "$dir" ]]; then
             mkdir -p "$dir" 2>/dev/null || {
@@ -111,6 +111,9 @@ ensure_dirs() {
                     fi
                     if [[ "$dir" == "$BYURU_LOGDIR" ]]; then
                         BYURU_LOGDIR="$fallback"
+                    fi
+                    if [[ "$dir" == "$BYURU_ROOT" ]]; then
+                        BYURU_ROOT="$fallback"
                     fi
                     log_info "Using fallback: $fallback"
                 fi
@@ -135,10 +138,6 @@ cmd_start() {
         mkdir -p "$(dirname "$BYURU_CONFIG")"
         local config_root="$BYURU_ROOT"
         local config_logdir="$BYURU_LOGDIR"
-        if [[ "$IS_TERMUX" == 1 ]]; then
-            config_root="$PREFIX/share/nginx/html"
-            config_logdir="$PREFIX/var/log/byuru"
-        fi
         cat > "$BYURU_CONFIG" <<EOF
 worker_processes auto;
 worker_connections 1024;
@@ -228,17 +227,31 @@ EOF
     eval "$start_cmd" &
     local pid=$!
     echo "$pid" > "$BYURU_PIDFILE"
-    sleep 1
+    sleep 2
     if kill -0 "$pid" 2>/dev/null; then
-        log_ok "byuru started successfully!"
-        echo ""
-        echo -e "  ${BOLD}PID:${NC}     $pid"
-        echo -e "  ${BOLD}Config:${NC}  $BYURU_CONFIG"
-        echo -e "  ${BOLD}Port:${NC}    $BYURU_PORT"
-        echo -e "  ${BOLD}Root:${NC}    $BYURU_ROOT"
-        echo -e "  ${BOLD}Logs:${NC}    $BYURU_LOGDIR"
-        echo ""
-        log_info "Visit http://localhost:$BYURU_PORT"
+        # Double-check it's actually listening on the port
+        local port_listening=false
+        if command -v ss >/dev/null 2>&1; then
+            ss -tlnp 2>/dev/null | grep -q ":$BYURU_PORT " && port_listening=true
+        elif command -v netstat >/dev/null 2>&1; then
+            netstat -tlnp 2>/dev/null | grep -q ":$BYURU_PORT " && port_listening=true
+        elif command -v lsof >/dev/null 2>&1; then
+            lsof -i :$BYURU_PORT 2>/dev/null | grep -q LISTEN && port_listening=true
+        fi
+        if [[ "$port_listening" == "true" ]]; then
+            log_ok "byuru started successfully!"
+            echo ""
+            echo -e "  ${BOLD}PID:${NC}     $pid"
+            echo -e "  ${BOLD}Config:${NC}  $BYURU_CONFIG"
+            echo -e "  ${BOLD}Port:${NC}    $BYURU_PORT"
+            echo -e "  ${BOLD}Root:${NC}    $BYURU_ROOT"
+            echo -e "  ${BOLD}Logs:${NC}    $BYURU_LOGDIR"
+            echo ""
+            log_info "Visit http://localhost:$BYURU_PORT"
+        else
+            log_warn "Process is alive but port $BYURU_PORT is not listening"
+            log_info "Check logs: $BYURU_LOGDIR/error.log"
+        fi
     else
         log_error "byuru failed to start!"
         rm -f "$BYURU_PIDFILE"
@@ -552,4 +565,3 @@ main() {
 }
 
 main "$@"
-
