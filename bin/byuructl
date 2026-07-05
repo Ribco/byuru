@@ -175,7 +175,7 @@ EOF
     if [[ ! -d "$BYURU_ROOT" ]]; then
         mkdir -p "$BYURU_ROOT"
     fi
-    if [[ ! -f "$BYURU_ROOT/index.html" ]]; then
+    if [[ ! -f "$BYURU_ROOT/index.html" ]] || [[ "$1" == "--force-html" ]]; then
         cat > "$BYURU_ROOT/index.html" <<'EOF'
 <!DOCTYPE html>
 <html lang="en">
