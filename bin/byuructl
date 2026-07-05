@@ -92,13 +92,7 @@ get_pid() {
 is_running() {
     local pid=$(get_pid)
     if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-        if command -v ss >/dev/null 2>&1; then
-            ss -tlnp 2>/dev/null | grep -q ":$BYURU_PORT " && return 0
-        elif command -v netstat >/dev/null 2>&1; then
-            netstat -tlnp 2>/dev/null | grep -q ":$BYURU_PORT " && return 0
-        else
-            return 0
-        fi
+        return 0
     fi
     return 1
 }
@@ -226,11 +220,16 @@ EOF
     fi
     log_ok "Configuration test passed"
     log_info "Starting byuru..."
-    "$BYURU_BIN" -c "$BYURU_CONFIG" &
+    local start_cmd="$BYURU_BIN -c \"$BYURU_CONFIG\""
+    if [[ -n "$BYURU_USER" ]] && [[ "$(id -u)" == "0" ]]; then
+        start_cmd="su - $BYURU_USER -c '$start_cmd'"
+    fi
+    eval "$start_cmd" &
     local pid=$!
     echo "$pid" > "$BYURU_PIDFILE"
     sleep 2
     if kill -0 "$pid" 2>/dev/null; then
+        # Double-check it's actually listening on the port
         local port_listening=false
         if command -v ss >/dev/null 2>&1; then
             ss -tlnp 2>/dev/null | grep -q ":$BYURU_PORT " && port_listening=true
@@ -281,8 +280,6 @@ cmd_stop() {
         kill -KILL "$pid" 2>/dev/null || true
         sleep 1
     fi
-    pkill -f "byuru.*-c.*$BYURU_CONFIG" 2>/dev/null || true
-    sleep 0.5
     rm -f "$BYURU_PIDFILE"
     if ! is_running; then
         log_ok "byuru stopped successfully"
@@ -496,7 +493,8 @@ cmd_uninstall() {
         exit 0
     fi
     cmd_stop 2>/dev/null || true
-    
+
+    # Check all possible install locations and remove from each
     local removed=false
     local install_dirs=(
         "/usr/local/bin"
@@ -505,7 +503,7 @@ cmd_uninstall() {
         "$PREFIX/bin"
         "/usr/bin"
     )
-    
+
     for install_dir in "${install_dirs[@]}"; do
         if [[ -f "$install_dir/byuru" ]] || [[ -f "$install_dir/byuructl" ]]; then
             rm -f "$install_dir/byuru"
@@ -515,7 +513,8 @@ cmd_uninstall() {
             removed=true
         fi
     done
-    
+
+    # Also check current directory
     if [[ -f "./byuru" ]] || [[ -f "./byuructl" ]]; then
         rm -f "./byuru"
         rm -f "./byuructl"
@@ -523,13 +522,13 @@ cmd_uninstall() {
         log_ok "Removed from current directory"
         removed=true
     fi
-    
+
     if [[ "$removed" == "false" ]]; then
         log_warn "No byuru installation found in standard locations"
     else
         log_ok "byuru uninstalled"
     fi
-    
+
     log_info "Config and logs preserved. Remove manually if desired:"
     if [[ "$IS_TERMUX" == 1 ]]; then
         echo "  - $PREFIX/etc/byuru/"
