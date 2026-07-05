@@ -721,7 +721,7 @@ def main():
         index_path = os.path.join(args.root, 'index.html')
         if not os.path.exists(index_path):
             with open(index_path, 'w') as f:
-                f.write(f'<!DOCTYPE html><html><head><title>byuru</title></head><body><h1>byuru is running!</h1><p>byuru/{__version__}</p></body></html>')
+                f.write(f'<!DOCTYPE html><html><head><title>byuru</title><style>body{{font-family:sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#1a1a2e;color:#fff}}h1{{font-size:3rem}}h1 span{{color:#00d4aa}}p{{color:#8892b0}}.footer{{position:fixed;bottom:2rem;left:0;right:0;text-align:center;color:#555;font-size:0.85rem}}</style></head><body><h1>by<span>uru</span></h1><p>Welcome to byuru!</p><p>byuru/{__version__}</p><div class="footer">Thank you for using byuru! Your HTTP server is running. However, further configurations are still needed.</div></body></html>')
     else:
         quick_config = None
     server = ByuruServer(args.config)
