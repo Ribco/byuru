@@ -1,0 +1,32 @@
+{
+  "name": "byuru",
+  "version": "1.0.1",
+  "description": "Lightweight HTTP server and reverse proxy",
+  "main": "bin/byuru-node",
+  "bin": {
+    "byuru": "bin/byuru-node",
+    "byuru-node": "bin/byuru-node",
+    "byuructl": "bin/byuructl"
+  },
+  "scripts": {
+    "start": "bin/byuru-node",
+    "test": "bin/byuru-node -t"
+  },
+  "keywords": ["http", "server", "proxy", "nginx", "lightweight"],
+  "author": "Solar <solarcontactmail@gmail.com>",
+  "license": "MIT",
+  "homepage": "https://github.com/Ribco/byuru",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Ribco/byuru.git"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "preferGlobal": true,
+  "files": [
+    "bin/",
+    "install.sh",
+    "README.md"
+  ]
+}
