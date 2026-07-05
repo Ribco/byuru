@@ -13,12 +13,12 @@ log_ok() { echo "[OK] $1"; }
 log_error() { echo "[ERROR] $1"; }
 
 print_banner() {
-    echo "    _                       "
-    echo "   | |__  _   _ _ __ _   _  "
-    echo "   | '_ \| | | | '__| | | | "
-    echo "   | |_) | |_| | |  | |_| | "
-    echo "   |_.__/ \__, |_|   \__, | "
-    echo "          |___/       |___/  "
+    echo "    ___.                                 "
+    echo "    \_ |__    ___.__.  __ __  _______   __ __ "
+    echo "     | __ \  <   |  | |  |  \ \_  __ \ |  |  \ "
+    echo "     | \_\ \  \___  | |  |  /  |  | \/ |  |  / "
+    echo "     |___  /  / ____| |____/   |__|    |____/  "
+    echo "         \/   \/                              "
     echo "byuru v${BYURU_VERSION} Installer"
     echo ""
 }
@@ -146,7 +146,7 @@ EOF
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>byuru - It Works!</title>
+<title>byuru - Welcome</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);color:#fff;min-height:100vh;display:flex;align-items:center;justify-content:center;text-align:center}
@@ -160,8 +160,9 @@ p{font-size:1.2rem;color:#8892b0;margin-bottom:2rem}
 </head>
 <body>
 <div class="container">
+<h1>Welcome to<span>byuru!</span></h1>
 <h1>by<span>uru</span></h1>
-<p>Your lightweight HTTP server is running successfully!</p>
+<p>Your lightweight HTTP server is running successfully! However, further configurations are still needed.</p>
 <span class="badge">byuru/1.0.0</span>
 </div>
 <div class="footer">Powered by byuru · Built for everyone, everywhere</div>
