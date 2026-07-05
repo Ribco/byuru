@@ -16,6 +16,7 @@ import re
 import gzip
 import mimetypes
 import urllib.parse
+import signal
 from datetime import datetime
 from pathlib import Path
 
@@ -577,6 +578,15 @@ class ByuruServer:
         self.running = True
         self.logger.open_logs()
         self.logger.info(f"byuru/{__version__} starting...")
+        
+        def handle_signal(signum, frame):
+            self.logger.info(f"Received signal {signum}, shutting down...")
+            self.stop()
+            sys.exit(0)
+        
+        signal.signal(signal.SIGTERM, handle_signal)
+        signal.signal(signal.SIGINT, handle_signal)
+        
         for server in self.servers:
             self._start_server(server)
         if self.bind_failed:
@@ -612,6 +622,8 @@ class ByuruServer:
         self.logger.info(f"Worker {worker_id} started")
         while self.running:
             try:
+                if not self.server_socket:
+                    break
                 ready, _, _ = select.select([self.server_socket], [], [], 1.0)
                 if not ready:
                     continue
@@ -655,12 +667,15 @@ class ByuruServer:
         self.running = False
         self.logger.info("Shutting down byuru...")
         if self.server_socket:
-            self.server_socket.close()
+            try:
+                self.server_socket.close()
+            except Exception:
+                pass
+            self.server_socket = None
         for t in self.worker_threads:
             t.join(timeout=2)
         self.logger.close_logs()
         print("byuru stopped.")
-
 
 def print_banner():
     print(r"""
@@ -672,7 +687,6 @@ def print_banner():
          \/   \/                              
     byuru v1.0.0 - Lightweight HTTP Server & Reverse Proxy
     """)
-
 
 def main():
     import argparse
