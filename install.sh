@@ -13,6 +13,7 @@ log_ok() { echo "[OK] $1"; }
 log_error() { echo "[ERROR] $1"; }
 
 print_banner() {
+    echo "---------------------------------"
     echo "    ___.                                 "
     echo "    \_ |__    ___.__.  __ __  _______   __ __ "
     echo "     | __ \  <   |  | |  |  \ \_  __ \ |  |  \ "
@@ -20,6 +21,7 @@ print_banner() {
     echo "     |___  /  / ____| |____/   |__|    |____/  "
     echo "         \/   \/                              "
     echo "byuru v${BYURU_VERSION} Installer"
+    echo "---------------------------------"
     echo ""
 }
 
