@@ -29,7 +29,7 @@
 One-line install:
     `curl -fsSL https://raw.githubusercontent.com/Ribco/byuru/main/install.sh | bash`
     
-    Or with npm:
+Or with npm:
 `npm install -g byuru-server`
 
 Start the server:
