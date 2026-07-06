@@ -448,7 +448,8 @@ cmd_log_web() {
     
     # Build JSON payload via temp file to handle large/special chars safely
     local tmp_json
-    tmp_json=$(mktemp /tmp/byuru_log.XXXXXX.json)
+    tmp_json="$HOME/.byuru_log_upload.json"
+    rm -f "$tmp_json"
     
     if command -v python3 >/dev/null 2>&1; then
         python3 -c "
