@@ -671,6 +671,7 @@ main() {
         status) cmd_status ;;
         test|check) cmd_test ;;
         logs) cmd_logs "$2" ;;
+        log-web) cmd_log_web ;;
         config|show) cmd_config ;;
         edit) cmd_edit ;;
         install) cmd_install ;;
