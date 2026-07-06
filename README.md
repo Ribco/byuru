@@ -6,7 +6,7 @@
 
 > A lightweight HTTP server and reverse proxy, inspired by nginx. Built for everyone, everywhere.
 
-![byuru]([https://byuru.qd.je](https://i.imgur.com/jLYqjw2.png))
+[![byuru](https://i.imgur.com/jLYqjw2.png)](https://byuru.qd.je)
 
 ## Features
 
