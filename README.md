@@ -1,24 +1,36 @@
-# byuru
+ byuru
 
-A lightweight HTTP server and reverse proxy, inspired by nginx. Built for everyone, everywhere.
+[![Version](https://img.shields.io/badge/version-1.0.1-00d4aa)](https://github.com/Ribco/byuru)
+[![License](https://img.shields.io/badge/license-MIT-00d4aa)](LICENSE)
+[![npm](https://img.shields.io/npm/v/byuru-server?color=00d4aa)](https://www.npmjs.com/package/byuru-server)
+
+> A lightweight HTTP server and reverse proxy, inspired by nginx. Built for everyone, everywhere.
+
+![byuru](https://byuru.qd.je/screenshot.png)
 
 ## Features
 
-- Static file serving with MIME types, autoindex, ETag caching
-- Reverse proxy with header forwarding
-- Load balancing (round-robin, least connections, IP hash)
-- Rate limiting
-- nginx-style config parser
-- Graceful reload
-- Multi-worker model
-- Access and error logging
-- Gzip compression ready
+- ⚡ **Static file serving** with MIME types, autoindex, ETag caching
+- 🔒 **Reverse proxy** with header forwarding
+- ⚖️ **Load balancing** (round-robin, least connections, IP hash)
+- 🛡️ **Rate limiting**
+- 📝 **nginx-style config parser**
+- 🔄 **Graceful reload**
+- 👷 **Multi-worker model**
+- 📊 **Access and error logging**
+- 📦 **Gzip compression ready**
+- 🐍 **Python & Node.js** — Choose your runtime
+- 📱 **Termux Ready** — Run from your Android phone
+- 🚀 **Express Compatible** — Static + dynamic in one server
+- 🌍 **Everywhere** — Linux, macOS, Windows, Termux, WSL
 
 ## Quick Start
 
 One-line install:
-
-    curl -fsSL https://raw.githubusercontent.com/Ribco/byuru/main/install.sh | bash
+    `curl -fsSL https://raw.githubusercontent.com/Ribco/byuru/main/install.sh | bash`
+    
+    Or with npm:
+`npm install -g byuru-server`
 
 Start the server:
 
