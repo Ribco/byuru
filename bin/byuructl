@@ -1,6 +1,6 @@
 #!/bin/bash
 # byuructl - Control script for byuru HTTP server
-# Version: 1.0.0
+# Version: 1.1.0
 
 set -e
 
@@ -56,7 +56,7 @@ print_banner() {
          \/   \/                              
 EOF
     echo -e "${NC}"
-    echo -e "${BOLD}byuructl v1.0.0${NC} - Control your byuru server"
+    echo -e "${BOLD}byuructl v1.1.0${NC} - Control your byuru server"
     echo ""
 }
 
@@ -203,7 +203,7 @@ p{font-size:1.2rem;color:#8892b0;margin-bottom:2rem}
 <div class="container">
 <h1>by<span>uru</span></h1>
 <p>Your lightweight HTTP server is running successfully! However, further configurations are still needed.</p>
-<span class="badge">byuru/1.0.0</span>
+<span class="badge">byuru/1.1.0</span>
 <div class="links">
 <a href="https://github.com/Ribco/byuru">GitHub</a>
 <a href="https://github.com/Ribco/byuru#configuration">Docs</a>
