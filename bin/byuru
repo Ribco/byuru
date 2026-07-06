@@ -2,7 +2,7 @@
 """
 byuru - A lightweight HTTP server and reverse proxy
 Inspired by nginx. Built for everyone, everywhere.
-Version: 1.0.0
+Version: 1.1.0
 """
 
 import socket
@@ -20,8 +20,21 @@ import signal
 from datetime import datetime
 from pathlib import Path
 
-__version__ = "1.0.0"
-
+__version__ = "1.1.0"
+# HTTP/2 constants
+HTTP2_PREFACE = b'PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n'
+HTTP2_FRAME_HEADER_SIZE = 9
+HTTP2_SETTINGS_FRAME = 0x4
+HTTP2_HEADERS_FRAME = 0x1
+HTTP2_DATA_FRAME = 0x0
+HTTP2_GOAWAY_FRAME = 0x7
+HTTP2_RST_STREAM_FRAME = 0x3
+HTTP2_WINDOW_UPDATE_FRAME = 0x8
+HTTP2_PING_FRAME = 0x6
+HTTP2_CONTINUATION_FRAME = 0x9
+HTTP2_FLAG_END_HEADERS = 0x4
+HTTP2_FLAG_END_STREAM = 0x1
+HTTP2_FLAG_ACK = 0x1
 DEFAULT_CONFIG = """
 worker_processes auto;
 worker_connections 1024;
@@ -74,7 +87,30 @@ MIME_TYPES = {
     '.webm': 'video/webm', '.mp3': 'audio/mpeg', '.woff': 'font/woff',
     '.woff2': 'font/woff2', '.ttf': 'font/ttf', '.otf': 'font/otf',
 }
-
+# HPACK static table (first 61 entries)
+HPACK_STATIC_TABLE = [
+    (':authority', ''), (':method', 'GET'), (':method', 'POST'),
+    (':path', '/'), (':path', '/index.html'), (':scheme', 'http'),
+    (':scheme', 'https'), (':status', '200'), (':status', '204'),
+    (':status', '206'), (':status', '304'), (':status', '400'),
+    (':status', '404'), (':status', '500'), ('accept-charset', ''),
+    ('accept-encoding', 'gzip, deflate'), ('accept-language', ''),
+    ('accept-ranges', ''), ('accept', ''),
+    ('access-control-allow-origin', ''), ('age', ''), ('allow', ''),
+    ('authorization', ''), ('cache-control', ''), ('content-disposition', ''),
+    ('content-encoding', ''), ('content-language', ''), ('content-length', ''),
+    ('content-location', ''), ('content-range', ''), ('content-type', ''),
+    ('cookie', ''), ('date', ''), ('etag', ''), ('expect', ''),
+    ('expires', ''), ('from', ''), ('host', ''), ('if-match', ''),
+    ('if-modified-since', ''), ('if-none-match', ''), ('if-range', ''),
+    ('if-unmodified-since', ''), ('last-modified', ''), ('link', ''),
+    ('location', ''), ('max-forwards', ''), ('proxy-authenticate', ''),
+    ('proxy-authorization', ''), ('range', ''), ('referer', ''),
+    ('refresh', ''), ('retry-after', ''), ('server', ''),
+    ('set-cookie', ''), ('strict-transport-security', ''),
+    ('transfer-encoding', ''), ('user-agent', ''), ('vary', ''), ('via', ''),
+    ('www-authenticate', ''),
+]
 HTTP_STATUS = {
     200: 'OK', 201: 'Created', 204: 'No Content', 301: 'Moved Permanently',
     302: 'Found', 304: 'Not Modified', 400: 'Bad Request', 401: 'Unauthorized',
@@ -105,9 +141,9 @@ class Logger:
         if self.error_file:
             self.error_file.close()
 
-    def access(self, client_ip, method, path, status, bytes_sent, user_agent='-'):
+    def access(self, client_ip, method, path, status, bytes_sent, user_agent='-', protocol='HTTP/1.1'):
         timestamp = datetime.now().strftime('%d/%b/%Y:%H:%M:%S %z')
-        line = f'{client_ip} - - [{timestamp}] "{method} {path} HTTP/1.1" {status} {bytes_sent} "-" "{user_agent}"\n'
+        line = f'{client_ip} - - [{timestamp}] "{method} {path} {protocol}" {status} {bytes_sent} "-" "{user_agent}"\n'
         print(line.strip())
         if self.access_file:
             self.access_file.write(line)
@@ -535,18 +571,382 @@ class ServerBlock:
             if result.status != 404:
                 return result
         return HTTPResponse(404, body=b'Not Found')
+class HPACKDecoder:
+    def __init__(self):
+        self.dynamic_table = []
+        self.max_table_size = 4096
+    
+    def decode(self, data):
+        headers = {}
+        i = 0
+        while i < len(data):
+            byte = data[i]
+            if byte & 0x80:
+                index = self._decode_integer(data, i, 7)
+                i = index[1]
+                name, value = self._get_from_table(index[0])
+                headers[name] = value
+            elif byte & 0xc0 == 0x40:
+                index = self._decode_integer(data, i, 6)
+                i = index[1]
+                if index[0] == 0:
+                    name_len = self._decode_integer(data, i, 7)
+                    i = name_len[1]
+                    name = data[i:i+name_len[0]].decode('utf-8', errors='replace')
+                    i += name_len[0]
+                else:
+                    name, _ = self._get_from_table(index[0])
+                value_len = self._decode_integer(data, i, 7)
+                i = value_len[1]
+                value = data[i:i+value_len[0]].decode('utf-8', errors='replace')
+                i += value_len[0]
+                headers[name] = value
+                self._add_to_table(name, value)
+            elif byte & 0xf0 == 0x00:
+                index = self._decode_integer(data, i, 4)
+                i = index[1]
+                if index[0] == 0:
+                    name_len = self._decode_integer(data, i, 7)
+                    i = name_len[1]
+                    name = data[i:i+name_len[0]].decode('utf-8', errors='replace')
+                    i += name_len[0]
+                else:
+                    name, _ = self._get_from_table(index[0])
+                value_len = self._decode_integer(data, i, 7)
+                i = value_len[1]
+                value = data[i:i+value_len[0]].decode('utf-8', errors='replace')
+                i += value_len[0]
+                headers[name] = value
+            elif byte & 0xf0 == 0x10:
+                index = self._decode_integer(data, i, 4)
+                i = index[1]
+                if index[0] == 0:
+                    name_len = self._decode_integer(data, i, 7)
+                    i = name_len[1]
+                    name = data[i:i+name_len[0]].decode('utf-8', errors='replace')
+                    i += name_len[0]
+                else:
+                    name, _ = self._get_from_table(index[0])
+                value_len = self._decode_integer(data, i, 7)
+                i = value_len[1]
+                value = data[i:i+value_len[0]].decode('utf-8', errors='replace')
+                i += value_len[0]
+                headers[name] = value
+            elif byte & 0xe0 == 0x20:
+                size = self._decode_integer(data, i, 5)
+                i = size[1]
+                self.max_table_size = size[0]
+                self._evict_table()
+            else:
+                i += 1
+        return headers
+    
+    def _decode_integer(self, data, start, prefix_bits):
+        mask = (1 << prefix_bits) - 1
+        value = data[start] & mask
+        if value < mask:
+            return (value, start + 1)
+        i = start + 1
+        m = 0
+        while i < len(data):
+            byte = data[i]
+            value += (byte & 0x7f) << m
+            m += 7
+            i += 1
+            if not (byte & 0x80):
+                break
+        return (value, i)
+    
+    def _get_from_table(self, index):
+        if index == 0:
+            return ('', '')
+        if index <= len(HPACK_STATIC_TABLE):
+            return HPACK_STATIC_TABLE[index - 1]
+        dyn_index = index - len(HPACK_STATIC_TABLE) - 1
+        if 0 <= dyn_index < len(self.dynamic_table):
+            return self.dynamic_table[dyn_index]
+        return ('', '')
+    
+    def _add_to_table(self, name, value):
+        self.dynamic_table.insert(0, (name, value))
+        self._evict_table()
+    
+    def _evict_table(self):
+        while self.dynamic_table:
+            size = sum(len(n.encode('utf-8')) + len(v.encode('utf-8')) + 32 for n, v in self.dynamic_table)
+            if size <= self.max_table_size:
+                break
+            self.dynamic_table.pop()
 
+
+class HPACKEncoder:
+    def __init__(self):
+        self.dynamic_table = []
+        self.max_table_size = 4096
+    
+    def encode(self, headers):
+        result = bytearray()
+        for name, value in headers.items():
+            found_index = 0
+            for i, (static_name, static_value) in enumerate(HPACK_STATIC_TABLE):
+                if static_name.lower() == name.lower() and static_value == value:
+                    found_index = i + 1
+                    break
+                elif static_name.lower() == name.lower() and not static_value:
+                    found_index = i + 1
+            
+            if found_index > 0 and HPACK_STATIC_TABLE[found_index - 1][1] == value:
+                result.extend(self._encode_integer(found_index, 7))
+                result[0] |= 0x80
+            elif found_index > 0:
+                result.extend(self._encode_integer(found_index, 6))
+                result[0] |= 0x40
+                result.extend(self._encode_string(value))
+                self._add_to_table(name, value)
+            else:
+                result.append(0x40)
+                result.extend(self._encode_string(name))
+                result.extend(self._encode_string(value))
+                self._add_to_table(name, value)
+        return bytes(result)
+    
+    def _encode_integer(self, value, prefix_bits):
+        mask = (1 << prefix_bits) - 1
+        if value < mask:
+            return bytes([value])
+        result = bytearray([mask])
+        value -= mask
+        while value >= 0x80:
+            result.append((value & 0x7f) | 0x80)
+            value >>= 7
+        result.append(value)
+        return bytes(result)
+    
+    def _encode_string(self, s):
+        encoded = s.encode('utf-8')
+        length = self._encode_integer(len(encoded), 7)
+        return length + encoded
+    
+    def _add_to_table(self, name, value):
+        self.dynamic_table.insert(0, (name, value))
+        while self.dynamic_table:
+            size = sum(len(n.encode('utf-8')) + len(v.encode('utf-8')) + 32 for n, v in self.dynamic_table)
+            if size <= self.max_table_size:
+                break
+            self.dynamic_table.pop()
+
+
+class HTTP2Connection:
+    def __init__(self, sock, addr, server_block, logger):
+        self.sock = sock
+        self.addr = addr
+        self.server_block = server_block
+        self.logger = logger
+        self.decoder = HPACKDecoder()
+        self.encoder = HPACKEncoder()
+        self.streams = {}
+        self.next_stream_id = 2
+        self.settings = {
+            'header_table_size': 4096, 'enable_push': 0,
+            'max_concurrent_streams': 100, 'initial_window_size': 65535,
+            'max_frame_size': 16384, 'max_header_list_size': 8192,
+        }
+        self.client_settings = {}
+        self.running = True
+    
+    def send_frame(self, frame_type, flags, stream_id, payload):
+        length = len(payload)
+        header = struct.pack('>I', length)[1:] + struct.pack('>BBI', frame_type, flags, stream_id & 0x7fffffff)
+        self.sock.sendall(header + payload)
+    
+    def send_settings(self, ack=False):
+        if ack:
+            self.send_frame(HTTP2_SETTINGS_FRAME, HTTP2_FLAG_ACK, 0, b'')
+        else:
+            payload = b''
+            payload += struct.pack('>HH', 1, self.settings['header_table_size'])
+            payload += struct.pack('>HH', 2, self.settings['enable_push'])
+            payload += struct.pack('>HH', 3, self.settings['max_concurrent_streams'])
+            payload += struct.pack('>HH', 4, self.settings['initial_window_size'])
+            payload += struct.pack('>HH', 5, self.settings['max_frame_size'])
+            self.send_frame(HTTP2_SETTINGS_FRAME, 0, 0, payload)
+    
+    def send_headers(self, stream_id, status, headers=None):
+        response_headers = [(':status', str(status))]
+        if headers:
+            for k, v in headers.items():
+                response_headers.append((k.lower(), v))
+        encoded = self.encoder.encode(response_headers)
+        self.send_frame(HTTP2_HEADERS_FRAME, HTTP2_FLAG_END_HEADERS, stream_id, encoded)
+    
+    def send_data(self, stream_id, data, end_stream=True):
+        flags = HTTP2_FLAG_END_STREAM if end_stream else 0
+        max_size = self.settings['max_frame_size']
+        while len(data) > max_size:
+            chunk = data[:max_size]
+            data = data[max_size:]
+            self.send_frame(HTTP2_DATA_FRAME, 0, stream_id, chunk)
+        self.send_frame(HTTP2_DATA_FRAME, flags, stream_id, data)
+    
+    def handle_stream(self, stream_id, headers, body=b''):
+        try:
+            method = headers.get(':method', 'GET')
+            path = headers.get(':path', '/')
+            request = HTTPRequest()
+            request.method = method
+            request.path = path.split('?')[0]
+            request.query_string = path.split('?', 1)[1] if '?' in path else ''
+            request.version = 'HTTP/2.0'
+            request.client_ip = self.addr[0]
+            request.body = body
+            request.headers = {k: v for k, v in headers.items() if not k.startswith(':')}
+            response = self.server_block.handle_request(request)
+            self.send_headers(stream_id, response.status, response.headers)
+            if response.body:
+                self.send_data(stream_id, response.body, end_stream=True)
+            else:
+                self.send_data(stream_id, b'', end_stream=True)
+            user_agent = request.headers.get('user-agent', '-')
+            self.logger.access(request.client_ip, method, path, response.status,
+                             len(response.body), user_agent, 'HTTP/2.0')
+        except Exception as e:
+            self.logger.error(f"HTTP/2 stream {stream_id} error: {e}")
+            self.send_headers(stream_id, 500)
+            self.send_data(stream_id, b'Internal Server Error', end_stream=True)
+    
+    def run(self):
+        try:
+            preface = b''
+            while len(preface) < len(HTTP2_PREFACE):
+                chunk = self.sock.recv(len(HTTP2_PREFACE) - len(preface))
+                if not chunk:
+                    return
+                preface += chunk
+            if preface != HTTP2_PREFACE:
+                self.logger.error("Invalid HTTP/2 preface")
+                return
+            
+            frame_header = b''
+            while len(frame_header) < HTTP2_FRAME_HEADER_SIZE:
+                chunk = self.sock.recv(HTTP2_FRAME_HEADER_SIZE - len(frame_header))
+                if not chunk:
+                    return
+                frame_header += chunk
+            
+            length = struct.unpack('>I', b'\x00' + frame_header[:3])[0]
+            frame_type = frame_header[3]
+            flags = frame_header[4]
+            stream_id = struct.unpack('>I', frame_header[5:9])[0] & 0x7fffffff
+            payload = b''
+            while len(payload) < length:
+                chunk = self.sock.recv(length - len(payload))
+                if not chunk:
+                    return
+                payload += chunk
+            
+            if frame_type == HTTP2_SETTINGS_FRAME:
+                for i in range(0, len(payload), 6):
+                    if i + 6 <= len(payload):
+                        setting_id = struct.unpack('>H', payload[i:i+2])[0]
+                        value = struct.unpack('>I', payload[i+2:i+6])[0]
+                        self.client_settings[setting_id] = value
+            
+            self.send_settings()
+            self.send_settings(ack=True)
+            
+            current_stream = None
+            current_headers = None
+            current_body = bytearray()
+            
+            while self.running:
+                frame_header = b''
+                while len(frame_header) < HTTP2_FRAME_HEADER_SIZE:
+                    chunk = self.sock.recv(HTTP2_FRAME_HEADER_SIZE - len(frame_header))
+                    if not chunk:
+                        return
+                    frame_header += chunk
+                
+                length = struct.unpack('>I', b'\x00' + frame_header[:3])[0]
+                frame_type = frame_header[3]
+                flags = frame_header[4]
+                stream_id = struct.unpack('>I', frame_header[5:9])[0] & 0x7fffffff
+                
+                payload = b''
+                while len(payload) < length:
+                    chunk = self.sock.recv(length - len(payload))
+                    if not chunk:
+                        return
+                    payload += chunk
+                
+                if frame_type == HTTP2_SETTINGS_FRAME:
+                    if flags & HTTP2_FLAG_ACK:
+                        pass
+                    else:
+                        for i in range(0, len(payload), 6):
+                            if i + 6 <= len(payload):
+                                setting_id = struct.unpack('>H', payload[i:i+2])[0]
+                                value = struct.unpack('>I', payload[i+2:i+6])[0]
+                                self.client_settings[setting_id] = value
+                        self.send_settings(ack=True)
+                
+                elif frame_type == HTTP2_HEADERS_FRAME:
+                    headers = self.decoder.decode(payload)
+                    if flags & HTTP2_FLAG_END_HEADERS:
+                        if flags & HTTP2_FLAG_END_STREAM:
+                            self.handle_stream(stream_id, headers, b'')
+                        else:
+                            current_stream = stream_id
+                            current_headers = headers
+                            current_body = bytearray()
+                    else:
+                        current_stream = stream_id
+                        current_headers = headers
+                        current_body = bytearray()
+                
+                elif frame_type == HTTP2_CONTINUATION_FRAME:
+                    if current_stream == stream_id:
+                        more_headers = self.decoder.decode(payload)
+                        current_headers.update(more_headers)
+                        if flags & HTTP2_FLAG_END_HEADERS and flags & HTTP2_FLAG_END_STREAM:
+                            self.handle_stream(stream_id, current_headers, b'')
+                            current_stream = None
+                
+                elif frame_type == HTTP2_DATA_FRAME:
+                    if current_stream == stream_id:
+                        current_body.extend(payload)
+                        if flags & HTTP2_FLAG_END_STREAM:
+                            self.handle_stream(stream_id, current_headers, bytes(current_body))
+                            current_stream = None
+                
+                elif frame_type == HTTP2_PING_FRAME:
+                    self.send_frame(HTTP2_PING_FRAME, HTTP2_FLAG_ACK, 0, payload)
+                
+                elif frame_type == HTTP2_GOAWAY_FRAME:
+                    self.running = False
+                    break
+                
+                elif frame_type == HTTP2_RST_STREAM_FRAME:
+                    if stream_id in self.streams:
+                        del self.streams[stream_id]
+        except Exception as e:
+            self.logger.error(f"HTTP/2 connection error: {e}")
+        finally:
+            try:
+                self.sock.close()
+            except:
+                pass
 class ByuruServer:
-    def __init__(self, config_path=None):
-        self.config_path = config_path
-        self.config = {}
-        self.servers = []
-        self.logger = Logger()
-        self.running = False
-        self.server_socket = None
-        self.worker_threads = []
-        self.max_workers = 4
-        self.bind_failed = False
+    def __init__(self, config_path=None, http2=False):
+    self.http2_enabled = http2
+    self.config_path = config_path
+    self.config = {}
+    self.servers = []
+    self.logger = Logger()
+    self.running = False
+    self.server_socket = None
+    self.worker_threads = []
+    self.max_workers = 4
+    self.bind_failed = False
 
     def load_config(self, config_text=None):
         if config_text:
@@ -577,7 +977,8 @@ class ByuruServer:
     def start(self):
         self.running = True
         self.logger.open_logs()
-        self.logger.info(f"byuru/{__version__} starting...")
+        protocol = "HTTP/2" if self.http2_enabled else "HTTP/1.1"
+        self.logger.info(f"byuru/{__version__} starting with {protocol}...")
         
         def handle_signal(signum, frame):
             self.logger.info(f"Received signal {signum}, shutting down...")
@@ -607,7 +1008,7 @@ class ByuruServer:
             self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.server_socket.bind(('0.0.0.0', port))
             self.server_socket.listen(128)
-            self.logger.info(f"Listening on 0.0.0.0:{port}")
+            self.logger.info(f"Listening on 0.0.0.0:{port} ({'HTTP/2' if self.http2_enabled else 'HTTP/1.1'})")
         except Exception as e:
             self.logger.error(f"Failed to bind to port {port}: {e}")
             self.bind_failed = True
@@ -636,33 +1037,75 @@ class ByuruServer:
     def _handle_client(self, client_socket, client_addr, server_block):
         try:
             client_socket.settimeout(30)
-            data = b''
-            while True:
-                chunk = client_socket.recv(4096)
-                if not chunk:
-                    break
-                data += chunk
-                if b'\r\n\r\n' in data or b'\n\n' in data:
-                    break
-            if not data:
-                client_socket.close()
+        
+        if self.http2_enabled:
+            peek_data = client_socket.recv(24, socket.MSG_PEEK)
+            if len(peek_data) >= 24 and peek_data == HTTP2_PREFACE:
+                client_socket.recv(24)
+                conn = HTTP2Connection(client_socket, client_addr, server_block, self.logger)
+                conn.run()
                 return
-            request = HTTPRequest.parse(data, client_addr[0])
-            if not request:
-                client_socket.close()
-                return
-            response = server_block.handle_request(request)
-            user_agent = request.headers.get('user-agent', '-')
-            self.logger.access(request.client_ip, request.method, request.path, response.status, len(response.body), user_agent)
-            client_socket.sendall(response.to_bytes())
+        
+        data = b''
+        while True:
+            chunk = client_socket.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+            if b'\r\n\r\n' in data or b'\n\n' in data:
+                break
+        if not data:
             client_socket.close()
-        except Exception as e:
-            self.logger.error(f"Client handler error: {e}")
-            try:
-                client_socket.close()
-            except:
-                pass
-
+            return
+        
+        if self.http2_enabled and b'Upgrade: h2c' in data:
+            self._handle_http2_upgrade(client_socket, client_addr, server_block, data)
+            return
+        
+        request = HTTPRequest.parse(data, client_addr[0])
+        if not request:
+            client_socket.close()
+            return
+        response = server_block.handle_request(request)
+        user_agent = request.headers.get('user-agent', '-')
+        self.logger.access(request.client_ip, request.method, request.path, response.status, len(response.body), user_agent)
+        client_socket.sendall(response.to_bytes())
+        client_socket.close()
+    except Exception as e:
+        self.logger.error(f"Client handler error: {e}")
+        try:
+            client_socket.close()
+        except:
+            pass
+    def _handle_http2_upgrade(self, client_socket, client_addr, server_block, data):
+        try:
+        response = b"HTTP/1.1 101 Switching Protocols\r\n"
+        response += b"Connection: Upgrade\r\n"
+        response += b"Upgrade: h2c\r\n"
+        response += b"\r\n"
+        client_socket.sendall(response)
+        
+        conn = HTTP2Connection(client_socket, client_addr, server_block, self.logger)
+        conn.send_settings()
+        
+        request = HTTPRequest.parse(data, client_addr[0])
+        if request:
+            headers = {
+                ':method': request.method,
+                ':path': request.path + (('?' + request.query_string) if request.query_string else ''),
+                ':scheme': 'http',
+                ':authority': request.headers.get('host', 'localhost'),
+            }
+            headers.update(request.headers)
+            conn.handle_stream(1, headers, request.body)
+        
+        conn.run()
+    except Exception as e:
+        self.logger.error(f"HTTP/2 upgrade error: {e}")
+        try:
+            client_socket.close()
+        except:
+            pass
     def stop(self):
         self.running = False
         self.logger.info("Shutting down byuru...")
@@ -685,7 +1128,7 @@ def print_banner():
      | \_\ \  \___  | |  |  /  |  | \/ |  |  / 
      |___  /  / ____| |____/   |__|    |____/  
          \/   \/                              
-    byuru v1.0.0 - Lightweight HTTP Server & Reverse Proxy
+    byuru v1.1.0 - Lightweight HTTP Server & Reverse Proxy
     """)
 
 def main():
@@ -696,7 +1139,9 @@ def main():
     parser.add_argument('-r', '--root', default='./www', help='Document root')
     parser.add_argument('-t', '--test', action='store_true', help='Test configuration')
     parser.add_argument('-v', '--version', action='version', version=f'byuru/{__version__}')
+    parser.add_argument('--http2', action='store_true', help='Enable HTTP/2 support')
     args = parser.parse_args()
+    server = ByuruServer(args.config, http2=args.http2)
     print_banner()
     if args.test:
         print("Testing configuration...")
