@@ -223,7 +223,11 @@ EOF
     fi
     log_ok "Configuration test passed"
     log_info "Starting byuru..."
-    local start_cmd="$BYURU_BIN -c \"$BYURU_CONFIG\""
+    local http2_flag=""
+if [[ "$1" == "--http2" ]] || [[ "$BYURU_HTTP2" == "1" ]]; then
+    http2_flag="--http2"
+fi
+local start_cmd="$BYURU_BIN -c \"$BYURU_CONFIG\" $http2_flag"
     if [[ -n "$BYURU_USER" ]] && [[ "$(id -u)" == "0" ]]; then
         start_cmd="su - $BYURU_USER -c '$start_cmd'"
     fi
@@ -672,6 +676,7 @@ cmd_help() {
     echo "  byuructl start                    # Start server"
     echo "  byuructl reload                   # Reload config"
     echo "  byuructl logs error               # Tail error logs"
+    echo "  byuructl start --http2            # Start with HTTP/2 support"
     echo "  BYURU_PORT=9000 byuructl start    # Start on custom port"
     echo ""
 }
@@ -679,7 +684,7 @@ cmd_help() {
 main() {
     local command="${1:-help}"
     case "$command" in
-        start) cmd_start ;;
+        start) cmd_start "$2" ;;
         stop) cmd_stop ;;
         reload) cmd_reload ;;
         restart) cmd_restart ;;
