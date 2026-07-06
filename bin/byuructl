@@ -422,7 +422,81 @@ cmd_config() {
     echo ""
     cat "$BYURU_CONFIG"
 }
-
+cmd_log_web() {
+    print_banner
+    local log_file="$BYURU_LOGDIR/error.log"
+    if [[ ! -f "$log_file" ]]; then
+        log_warn "Error log not found: $log_file"
+        log_info "Start byuru first to generate logs"
+        exit 1
+    fi
+    
+    log_info "Reading error log..."
+    local log_content
+    log_content=$(cat "$log_file")
+    
+    if [[ -z "$log_content" ]]; then
+        log_warn "Error log is empty"
+        exit 0
+    fi
+    
+    log_info "Uploading to $LOG_WEB_API ..."
+    
+    if ! command -v curl >/dev/null 2>&1; then
+        log_error "curl is required but not installed"
+        exit 1
+    fi
+    
+    # Use python for JSON encoding (available in Termux)
+    local json_payload
+    if command -v python3 >/dev/null 2>&1; then
+        json_payload=$(python3 -c "import json,sys; print(json.dumps({'content': sys.stdin.read()}))" <<< "$log_content")
+    elif command -v python >/dev/null 2>&1; then
+        json_payload=$(python -c "import json,sys; print(json.dumps({'content': sys.stdin.read()}))" <<< "$log_content")
+    else
+        log_error "python or python3 is required for JSON encoding"
+        exit 1
+    fi
+    
+    local response
+    response=$(curl -s -X POST "$LOG_WEB_API" \
+        -H "Content-Type: application/json" \
+        -d "$json_payload" 2>/dev/null)
+    
+    if [[ -z "$response" ]]; then
+        log_error "Upload failed: no response from server"
+        exit 1
+    fi
+    
+    # Parse response - extract full_url
+    local paste_url
+    if command -v python3 >/dev/null 2>&1; then
+        paste_url=$(python3 -c "import sys,json; d=json.loads(sys.argv[1]); print(d.get('full_url',''))" "$response" 2>/dev/null)
+    elif command -v python >/dev/null 2>&1; then
+        paste_url=$(python -c "import sys,json; d=json.loads(sys.argv[1]); print(d.get('full_url',''))" "$response" 2>/dev/null)
+    else
+        # Fallback grep
+        paste_url=$(echo "$response" | grep -o '"full_url":"[^"]*"' | cut -d'"' -f4)
+    fi
+    
+    if [[ -n "$paste_url" ]]; then
+        log_ok "Log uploaded successfully!"
+        echo ""
+        echo -e "  ${BOLD}URL:${NC}  ${CYAN}${paste_url}${NC}"
+        echo ""
+        log_info "Share this link to show your error log"
+        
+        # Copy to clipboard
+        if command -v termux-clipboard-set >/dev/null 2>&1; then
+            echo "$paste_url" | termux-clipboard-set 2>/dev/null
+            log_info "Copied to clipboard"
+        fi
+    else
+        log_error "Upload failed: could not parse response"
+        log_info "Server response: $response"
+        exit 1
+    fi
+}
 cmd_edit() {
     local editor="${EDITOR:-nano}"
     if [[ ! -f "$BYURU_CONFIG" ]]; then
