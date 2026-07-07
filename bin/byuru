@@ -256,7 +256,7 @@ class ConfigParser:
             self._expect('}')
             if key not in ctx:
                 ctx[key] = []
-            ctx[key].append({'name': name, 'config': block})
+n            ctx[key].append({'name': name, 'config': block})
         else:
             values = []
             while self.pos < len(self.tokens) and self._current() != ';':
@@ -517,12 +517,20 @@ class ServerBlock:
         self.error_pages = {}
         self.rate_limiter = None
         self.autoindex = False
+        self.ssl_enabled = False
+        self.ssl_cert = None
+        self.ssl_key = None
         self._parse_config()
 
     def _parse_config(self):
         cfg = self.config.get('config', {})
         if 'listen' in cfg:
-            self.listen_port = int(cfg['listen'][0])
+            listen_vals = cfg['listen']
+            for val in listen_vals:
+                if val.isdigit():
+                    self.listen_port = int(val)
+                elif val == 'ssl':
+                    self.ssl_enabled = True
         if 'server_name' in cfg:
             self.server_names = cfg['server_name']
         if 'root' in cfg:
@@ -534,12 +542,35 @@ class ServerBlock:
         if 'location' in cfg:
             for loc in cfg['location']:
                 self.locations.append({'path': loc['name'], 'config': loc['config']})
+        if 'ssl_certificate' in cfg:
+            self.ssl_cert = cfg['ssl_certificate'][0]
+        if 'ssl_certificate_key' in cfg:
+            self.ssl_key = cfg['ssl_certificate_key'][0]
         if 'limit_req' in cfg or 'limit_req_zone' in cfg:
             self.rate_limiter = RateLimiter(rate=10, per=1, burst=20)
 
     def handle_request(self, request):
         if self.rate_limiter and not self.rate_limiter.is_allowed(request.client_ip):
             return HTTPResponse(429, body=b'Too Many Requests')
+        # Server name matching
+        if self.server_names:
+            host = request.headers.get('host', '').split(':')[0]
+            matched = False
+            for name in self.server_names:
+                if name == host or name == '_':
+                    matched = True
+                    break
+                if name.startswith('*.') and host.endswith(name[1:]):
+                    matched = True
+                    break
+                if name.startswith('~*'):
+                    import re
+                    pattern = name[3:].strip()
+                    if re.search(pattern, host, re.IGNORECASE):
+                        matched = True
+                        break
+            if not matched:
+                return HTTPResponse(404, body=b'Not Found')
         for loc in self.locations:
             path = loc['path']
             loc_cfg = loc['config']
@@ -1015,16 +1046,19 @@ class ByuruServer:
 
     def _start_server(self, server_block):
         port = server_block.listen_port
+        use_ssl = self.tls_enabled or server_block.ssl_enabled
+        cert_file = server_block.ssl_cert or self.tls_cert
+        key_file = server_block.ssl_key or self.tls_key
         try:
             self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            if self.tls_enabled:
+            if use_ssl:
                 import ssl
                 try:
                     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-                    context.load_cert_chain(self.tls_cert, self.tls_key)
+                    context.load_cert_chain(cert_file, key_file)
                 except FileNotFoundError:
-                    self.logger.error(f"TLS cert/key not found: {self.tls_cert}, {self.tls_key}")
+                    self.logger.error(f"TLS cert/key not found: {cert_file}, {key_file}")
                     self.logger.error("Run: byuructl tls")
                     self.bind_failed = True
                     return
@@ -1046,6 +1080,7 @@ class ByuruServer:
             self.logger.error(f"Failed to bind to port {port}: {e}")
             self.bind_failed = True
             return
+
     def _worker(self, server_block, worker_id):
         self.logger.info(f"Worker {worker_id} started")
         while self.running:
@@ -1064,6 +1099,7 @@ class ByuruServer:
     def _handle_client(self, client_socket, client_addr, server_block):
         try:
             client_socket.settimeout(30)
+            
             # Check ALPN for HTTP/2 over TLS
             if self.tls_enabled and self.http2_enabled:
                 alpn = client_socket.selected_alpn_protocol()
@@ -1071,6 +1107,7 @@ class ByuruServer:
                     conn = HTTP2Connection(client_socket, client_addr, server_block, self.logger)
                     conn.run()
                     return
+            
             # HTTP/2 h2c detection (cleartext)
             if self.http2_enabled and not self.tls_enabled:
                 peek_data = client_socket.recv(24, socket.MSG_PEEK)
@@ -1079,6 +1116,7 @@ class ByuruServer:
                     conn = HTTP2Connection(client_socket, client_addr, server_block, self.logger)
                     conn.run()
                     return
+            
             # HTTP/1.1 handling
             data = b''
             while True:
@@ -1091,9 +1129,11 @@ class ByuruServer:
             if not data:
                 client_socket.close()
                 return
+
             if self.http2_enabled and not self.tls_enabled and b'Upgrade: h2c' in data:
                 self._handle_http2_upgrade(client_socket, client_addr, server_block, data)
                 return
+
             request = HTTPRequest.parse(data, client_addr[0])
             if not request:
                 client_socket.close()
@@ -1113,6 +1153,7 @@ class ByuruServer:
                 client_socket.close()
             except:
                 pass
+
     def _handle_http2_upgrade(self, client_socket, client_addr, server_block, data):
         try:
             response = b"HTTP/1.1 101 Switching Protocols\r\n"
