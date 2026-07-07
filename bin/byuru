@@ -1061,7 +1061,6 @@ class ByuruServer:
                 if self.running:
                     self.logger.error(f"Worker {worker_id} error: {e}")
 
-def _handle_client(self, client_socket, client_addr, server_block):
     def _handle_client(self, client_socket, client_addr, server_block):
         try:
             client_socket.settimeout(30)
@@ -1105,7 +1104,11 @@ def _handle_client(self, client_socket, client_addr, server_block):
             client_socket.sendall(response.to_bytes())
             client_socket.close()
         except Exception as e:
-            self.logger.error(f"Client handler error: {e}")
+            import ssl
+            if isinstance(e, ssl.SSLError) and "HTTP_REQUEST" in str(e):
+                pass  # Plain HTTP on TLS port — silently drop
+            else:
+                self.logger.error(f"Client handler error: {e}")
             try:
                 client_socket.close()
             except:
