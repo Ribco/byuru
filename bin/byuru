@@ -1013,40 +1013,39 @@ class ByuruServer:
         except KeyboardInterrupt:
             self.stop()
 
-def _start_server(self, server_block):
-    port = server_block.listen_port
-    try:
-        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        
-        if self.tls_enabled:
-            import ssl
-            try:
-                context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-                context.load_cert_chain(self.tls_cert, self.tls_key)
-            except FileNotFoundError:
-                self.logger.error(f"TLS cert/key not found: {self.tls_cert}, {self.tls_key}")
-                self.logger.error("Run: byuructl tls")
-                self.bind_failed = True
-                return
-            if self.http2_enabled:
-                context.set_alpn_protocols(['h2', 'http/1.1'])
-            self.server_socket = context.wrap_socket(self.server_socket, server_side=True)
-            protocol = "HTTPS" + ("+HTTP/2" if self.http2_enabled else "")
-        
-        self.server_socket.bind(('0.0.0.0', port))
-        self.server_socket.listen(128)
-        self.logger.info(f"Listening on 0.0.0.0:{port} ({protocol})")
-    except Exception as e:
-        self.logger.error(f"Failed to bind to port {port}: {e}")
-        self.bind_failed = True
-        return
-        for i in range(self.max_workers):
-            t = threading.Thread(target=self._worker, args=(server_block, i))
-            t.daemon = True
-            t.start()
-            self.worker_threads.append(t)
-
+    def _start_server(self, server_block):
+        port = server_block.listen_port
+        try:
+            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if self.tls_enabled:
+                import ssl
+                try:
+                    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                    context.load_cert_chain(self.tls_cert, self.tls_key)
+                except FileNotFoundError:
+                    self.logger.error(f"TLS cert/key not found: {self.tls_cert}, {self.tls_key}")
+                    self.logger.error("Run: byuructl tls")
+                    self.bind_failed = True
+                    return
+                if self.http2_enabled:
+                    context.set_alpn_protocols(['h2', 'http/1.1'])
+                self.server_socket = context.wrap_socket(self.server_socket, server_side=True)
+                protocol = "HTTPS" + ("+HTTP/2" if self.http2_enabled else "")
+            else:
+                protocol = "HTTP" + ("/2" if self.http2_enabled else "")
+            self.server_socket.bind(('0.0.0.0', port))
+            self.server_socket.listen(128)
+            self.logger.info(f"Listening on 0.0.0.0:{port} ({protocol})")
+            for i in range(self.max_workers):
+                t = threading.Thread(target=self._worker, args=(server_block, i))
+                t.daemon = True
+                t.start()
+                self.worker_threads.append(t)
+        except Exception as e:
+            self.logger.error(f"Failed to bind to port {port}: {e}")
+            self.bind_failed = True
+            return
     def _worker(self, server_block, worker_id):
         self.logger.info(f"Worker {worker_id} started")
         while self.running:
@@ -1063,25 +1062,25 @@ def _start_server(self, server_block):
                     self.logger.error(f"Worker {worker_id} error: {e}")
 
 def _handle_client(self, client_socket, client_addr, server_block):
-    try:
-        client_socket.settimeout(30)
-        
-        # Check ALPN for HTTP/2 over TLS
-        if self.tls_enabled and self.http2_enabled:
-            alpn = client_socket.selected_alpn_protocol()
-            if alpn == 'h2':
-                conn = HTTP2Connection(client_socket, client_addr, server_block, self.logger)
-                conn.run()
-                return
-        
-        # Existing HTTP/2 h2c detection...
-        if self.http2_enabled and not self.tls_enabled:
-            peek_data = client_socket.recv(24, socket.MSG_PEEK)
-            if len(peek_data) >= 24 and peek_data == HTTP2_PREFACE:
-                client_socket.recv(24)
-                conn = HTTP2Connection(client_socket, client_addr, server_block, self.logger)
-                conn.run()
-                return
+    def _handle_client(self, client_socket, client_addr, server_block):
+        try:
+            client_socket.settimeout(30)
+            # Check ALPN for HTTP/2 over TLS
+            if self.tls_enabled and self.http2_enabled:
+                alpn = client_socket.selected_alpn_protocol()
+                if alpn == 'h2':
+                    conn = HTTP2Connection(client_socket, client_addr, server_block, self.logger)
+                    conn.run()
+                    return
+            # HTTP/2 h2c detection (cleartext)
+            if self.http2_enabled and not self.tls_enabled:
+                peek_data = client_socket.recv(24, socket.MSG_PEEK)
+                if len(peek_data) >= 24 and peek_data == HTTP2_PREFACE:
+                    client_socket.recv(24)
+                    conn = HTTP2Connection(client_socket, client_addr, server_block, self.logger)
+                    conn.run()
+                    return
+            # HTTP/1.1 handling
             data = b''
             while True:
                 chunk = client_socket.recv(4096)
@@ -1093,11 +1092,9 @@ def _handle_client(self, client_socket, client_addr, server_block):
             if not data:
                 client_socket.close()
                 return
-
-            if self.http2_enabled and b'Upgrade: h2c' in data:
+            if self.http2_enabled and not self.tls_enabled and b'Upgrade: h2c' in data:
                 self._handle_http2_upgrade(client_socket, client_addr, server_block, data)
                 return
-
             request = HTTPRequest.parse(data, client_addr[0])
             if not request:
                 client_socket.close()
@@ -1113,7 +1110,6 @@ def _handle_client(self, client_socket, client_addr, server_block):
                 client_socket.close()
             except:
                 pass
-
     def _handle_http2_upgrade(self, client_socket, client_addr, server_block, data):
         try:
             response = b"HTTP/1.1 101 Switching Protocols\r\n"
