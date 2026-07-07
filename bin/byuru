@@ -256,7 +256,7 @@ class ConfigParser:
             self._expect('}')
             if key not in ctx:
                 ctx[key] = []
-n            ctx[key].append({'name': name, 'config': block})
+            ctx[key].append({'name': name, 'config': block})
         else:
             values = []
             while self.pos < len(self.tokens) and self._current() != ';':
