@@ -68,6 +68,8 @@ Termux:
     byuructl logs error # Tail error logs
     byuructl config     # Show config
     byuructl edit       # Edit config
+    byuructl log-web    # Shows your error logs using web browser
+    byuructl start --tls   # Starts byuru With TLS - Using our byuru Limited Certificate.
 
 ## Configuration
 
