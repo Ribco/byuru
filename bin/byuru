@@ -557,39 +557,81 @@ class ServerBlock:
     def handle_request(self, request):
         if self.rate_limiter and not self.rate_limiter.is_allowed(request.client_ip):
             return HTTPResponse(429, body=b'Too Many Requests')
-        # Server name matching
-        if self.server_names:
-            host = request.headers.get('host', '').split(':')[0]
-            matched = False
-            for name in self.server_names:
-                if name == host or name == '_':
-                    matched = True
-                    break
-                if name.startswith('*.') and host.endswith(name[1:]):
-                    matched = True
-                    break
-                if name.startswith('~*'):
-                    import re
-                    pattern = name[3:].strip()
-                    if re.search(pattern, host, re.IGNORECASE):
-                        matched = True
-                        break
-            if not matched:
-                return HTTPResponse(404, body=b'Not Found')
+        # Server name matching...
+        
+        # Location matching with nginx-style priority:
+        # 1. Exact match (=)
+        # 2. Preferential prefix (^~) - longest wins, no regex
+        # 3. Longest prefix match
+        # 4. Regex (~, ~*) - first match wins
+        # 5. Fallback to longest prefix
+        
+        matched_loc = None
+        longest_prefix = None
+        longest_len = 0
+        
         for loc in self.locations:
             path = loc['path']
             loc_cfg = loc['config']
-            if self._match_location(request.path, path):
-                if 'proxy_pass' in loc_cfg:
-                    proxy = ReverseProxy(loc_cfg['proxy_pass'][0])
-                    return proxy.handle(request)
-                elif 'return' in loc_cfg:
-                    code = int(loc_cfg['return'][0])
-                    return HTTPResponse(status=code, body=b'')
-                elif 'try_files' in loc_cfg:
-                    return self._try_files(request, loc_cfg['try_files'])
+            
+            # Exact match (= /path)
+            if path.startswith('= '):
+                exact_path = path[2:]
+                if request.path == exact_path:
+                    matched_loc = loc
+                    break  # highest priority, stop immediately
+            
+            # Preferential prefix (^~ /path)
+            elif path.startswith('^~ '):
+                prefix_path = path[3:].rstrip('/')
+                if request.path.startswith(prefix_path):
+                    prefix_len = len(prefix_path)
+                    if prefix_len > longest_len:
+                        longest_len = prefix_len
+                        longest_prefix = loc
+                        matched_loc = loc  # ^~ wins over regex
+            
+            # Regex (~ /pattern or ~* /pattern)
+            elif path.startswith('~ ') or path.startswith('~* '):
+                if matched_loc and not matched_loc['path'].startswith('^~ '):
+                    # Only check regex if no ^~ matched
+                    pattern = path[2:].strip() if path.startswith('~ ') else path[3:].strip()
+                    flags = 0 if path.startswith('~ ') else re.IGNORECASE
+                    if re.search(pattern, request.path, flags):
+                        matched_loc = loc
+                        break  # first regex match wins
+            
+            # Normal prefix match
+            else:
+                prefix_path = path.rstrip('/')
+                if request.path.startswith(prefix_path):
+                    prefix_len = len(prefix_path)
+                    if prefix_len > longest_len:
+                        longest_len = prefix_len
+                        longest_prefix = loc
+                        if not matched_loc:
+                            matched_loc = loc
+        
+        # If no exact/regex matched, use longest prefix
+        if not matched_loc and longest_prefix:
+            matched_loc = longest_prefix
+        
+        if matched_loc:
+            loc_cfg = matched_loc['config']
+            path = matched_loc['path']
+            if 'proxy_pass' in loc_cfg:
+                proxy = ReverseProxy(loc_cfg['proxy_pass'][0])
+                return proxy.handle(request)
+            elif 'return' in loc_cfg:
+                code = int(loc_cfg['return'][0])
+                return HTTPResponse(status=code, body=b'')
+            elif 'try_files' in loc_cfg:
+                return self._try_files(request, loc_cfg['try_files'])
+        
+        # Fallback to static handler
         handler = StaticFileHandler(self.root, self.index_files, self.autoindex)
         return handler.handle(request.path)
+
 
     def _match_location(self, request_path, location_path):
         if location_path == '= /':
