@@ -194,7 +194,7 @@ cmd_start() {
         esac
     done
     
-    # Check TLS certs if requested
+        # Check TLS certs if requested
     if [[ -n "$tls_flag" ]]; then
         if [[ ! -f "$BYURU_CERT" ]] || [[ ! -f "$BYURU_KEY" ]]; then
             log_warn "TLS certificate not found"
@@ -205,6 +205,8 @@ cmd_start() {
         echo -e "  ${BOLD}Cert:${NC} $BYURU_CERT"
         echo -e "  ${BOLD}Key:${NC}  $BYURU_KEY"
     fi
+    
+    if is_running; then
         local pid=$(get_pid)
         log_warn "byuru is already running (PID: $pid)"
         echo "Use 'byuru reload' to restart or 'byuru stop' to stop."
