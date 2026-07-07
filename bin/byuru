@@ -520,8 +520,9 @@ class ServerBlock:
         self.ssl_enabled = False
         self.ssl_cert = None
         self.ssl_key = None
+        self.auto_ssl = False
+        self.auto_ssl_email = None
         self._parse_config()
-
     def _parse_config(self):
         cfg = self.config.get('config', {})
         if 'listen' in cfg:
@@ -546,6 +547,10 @@ class ServerBlock:
             self.ssl_cert = cfg['ssl_certificate'][0]
         if 'ssl_certificate_key' in cfg:
             self.ssl_key = cfg['ssl_certificate_key'][0]
+        if 'auto_ssl' in cfg:
+            self.auto_ssl = cfg['auto_ssl'][0].lower() == 'on'
+        if 'auto_ssl_email' in cfg:
+            self.auto_ssl_email = cfg['auto_ssl_email'][0]
         if 'limit_req' in cfg or 'limit_req_zone' in cfg:
             self.rate_limiter = RateLimiter(rate=10, per=1, burst=20)
 
@@ -1016,7 +1021,42 @@ class ByuruServer:
                     self.servers.append(ServerBlock(srv, self.logger))
         if not self.servers:
             self.servers.append(ServerBlock({'config': {}}, self.logger))
-
+    def _auto_ssl(self, server_block):
+        if not server_block.server_names:
+            self.logger.error("auto_ssl requires server_name")
+            return False
+        domain = server_block.server_names[0]
+        acme_sh = os.path.expanduser('~/.acme.sh/acme.sh')
+        if not os.path.isfile(acme_sh):
+            import shutil
+            acme_sh = shutil.which('acme.sh') or ''
+        if not acme_sh:
+            self.logger.error("auto_ssl: acme.sh not found")
+            return False
+        cert_dir = os.path.expanduser(f'~/.acme.sh/{domain}')
+        cert_file = os.path.join(cert_dir, 'fullchain.cer')
+        key_file = os.path.join(cert_dir, f'{domain}.key')
+        if os.path.isfile(cert_file) and os.path.isfile(key_file):
+            server_block.ssl_cert = cert_file
+            server_block.ssl_key = key_file
+            return True
+        self.logger.info(f"auto_ssl: issuing cert for {domain}...")
+        cmd = [acme_sh, '--issue', '-d', domain, '--standalone', '--force']
+        if server_block.auto_ssl_email:
+            cmd.extend(['--email', server_block.auto_ssl_email])
+        try:
+            import subprocess
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            if result.returncode != 0:
+                self.logger.error(f"auto_ssl failed: {result.stderr[-500:]}")
+                return False
+            server_block.ssl_cert = cert_file
+            server_block.ssl_key = key_file
+            self.logger.info(f"auto_ssl: cert issued for {domain}")
+            return True
+        except Exception as e:
+            self.logger.error(f"auto_ssl error: {e}")
+            return False
     def start(self):
         self.running = True
         self.logger.open_logs()
@@ -1031,6 +1071,10 @@ class ByuruServer:
         signal.signal(signal.SIGTERM, handle_signal)
         signal.signal(signal.SIGINT, handle_signal)
 
+        for server in self.servers:
+            if server.auto_ssl and server.ssl_enabled:
+                if not server.ssl_cert or not os.path.isfile(server.ssl_cert):
+                    self._auto_ssl(server)
         for server in self.servers:
             self._start_server(server)
         if self.bind_failed:
