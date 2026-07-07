@@ -6,7 +6,7 @@
 set -e
 
 REPO_URL="https://raw.githubusercontent.com/Ribco/byuru/main"
-BYURU_VERSION="1.0.0"
+BYURU_VERSION="1.1.0"
 
 log_info() { echo "[INFO] $1"; }
 log_ok() { echo "[OK] $1"; }
@@ -165,7 +165,7 @@ p{font-size:1.2rem;color:#8892b0;margin-bottom:2rem}
 <h1>Welcome to<span>byuru!</span></h1>
 <h1>by<span>uru</span></h1>
 <p>Your lightweight HTTP server is running successfully! However, further configurations are still needed.</p>
-<span class="badge">byuru/1.0.0</span>
+<span class="badge">byuru/1.1.0</span>
 </div>
 <div class="footer">Powered by byuru · Built for everyone, everywhere</div>
 </body>
