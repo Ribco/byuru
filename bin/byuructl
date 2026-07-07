@@ -499,7 +499,67 @@ cmd_logs() {
     echo ""
     tail -f "$log_file"
 }
-
+cmd_easteregg() {
+    print_banner
+    echo -e "${CYAN}"
+    echo "🦜 Party Parrot Mode Activated!"
+    echo "CTRL+C to exit dancing parrot."
+    echo -e "${NC}"
+    echo ""
+    
+    # Embedded ASCII parrot frames
+    local frames=(
+"
+    .-.
+   (o o)
+   |O|
+  /   \
+ ( === )
+  '---'
+"
+"
+    .-.
+   (o o)
+   |O|
+  / | \
+ ( === )
+  '---'
+"
+"
+    .-.
+   (- o)
+   |O|
+  /   \
+ ( === )
+  '---'
+"
+"
+    .-.
+   (o -)
+   |O|
+  / | \
+ ( === )
+  '---'
+"
+    )
+    
+    local colors=('\033[31m' '\033[33m' '\033[32m' '\033[36m' '\033[34m' '\033[35m')
+    local i=0
+    
+    trap 'echo -e "\033[0m"; exit 0' INT
+    
+    while true; do
+        local color="${colors[$((i % ${#colors[@]}))]}"
+        local frame="${frames[$((i % ${#frames[@]}))]}"
+        clear 2>/dev/null || printf '\033[2J\033[H'
+        echo -e "${color}${frame}\033[0m"
+        echo ""
+        echo -e "${CYAN}  🦜 byuru party parrot  🦜${NC}"
+        echo -e "${YELLOW}  CTRL+C to exit${NC}"
+        i=$((i + 1))
+        sleep 0.4
+    done
+}
 cmd_config() {
     print_banner
     if [[ ! -f "$BYURU_CONFIG" ]]; then
@@ -779,6 +839,7 @@ main() {
         edit) cmd_edit ;;
         install) cmd_install ;;
         uninstall|remove) cmd_uninstall ;;
+        easteregg|parrot|party) cmd_easteregg ;;
         help|--help|-h|""|*) cmd_help ;;
     esac
 }
