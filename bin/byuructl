@@ -27,6 +27,9 @@ fi
 BYURU_BIN="${BYURU_BIN:-$(which byuru 2>/dev/null || echo "")}"
 BYURU_USER="${BYURU_USER:-}"
 BYURU_PORT="${BYURU_PORT:-8080}"
+BYURU_TLS="${BYURU_TLS:-0}"
+BYURU_CERT="${BYURU_CERT:-$HOME/.byuru/certs/byuru.crt}"
+BYURU_KEY="${BYURU_KEY:-$HOME/.byuru/certs/byuru.key}"
 LOG_WEB_API="${LOG_WEB_API:-https://byuru.qd.je/api/paste.asp}"   
 LOG_WEB_BASE="${LOG_WEB_BASE:-https://byuru.qd.je}"               
 
