@@ -1,7 +1,7 @@
 #!/bin/bash
 # byuructl - Control script for byuru HTTP server
 # Version: 1.1.0
-
+# THEOPITINBUFIOLKAMANIA
 set -e
 
 # Auto-detect Termux first
