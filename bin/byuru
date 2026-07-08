@@ -1126,40 +1126,73 @@ class ByuruServer:
         if not self.servers:
             self.servers.append(ServerBlock({'config': {}}, self.logger))
     def _auto_ssl(self, server_block):
+        """Automatically issue SSL certificate via acme.sh"""
         if not server_block.server_names:
             self.logger.error("auto_ssl requires server_name")
             return False
         domain = server_block.server_names[0]
+        
+        # Check if acme.sh is available
         acme_sh = os.path.expanduser('~/.acme.sh/acme.sh')
         if not os.path.isfile(acme_sh):
             import shutil
             acme_sh = shutil.which('acme.sh') or ''
-        if not acme_sh:
-            self.logger.error("auto_ssl: acme.sh not found")
+        if not acme_sh or not os.path.isfile(acme_sh):
+            self.logger.error("auto_ssl requires acme.sh. Install: curl https://get.acme.sh | sh")
             return False
+        
+        # Set cert paths
         cert_dir = os.path.expanduser(f'~/.acme.sh/{domain}')
         cert_file = os.path.join(cert_dir, 'fullchain.cer')
         key_file = os.path.join(cert_dir, f'{domain}.key')
+        
+        # If certs already exist, use them and skip issuance
         if os.path.isfile(cert_file) and os.path.isfile(key_file):
+            self.logger.info(f"auto_ssl: existing cert found for {domain}, skipping issuance")
             server_block.ssl_cert = cert_file
             server_block.ssl_key = key_file
             return True
-        self.logger.info(f"auto_ssl: issuing cert for {domain}...")
+        
+        # Issue new cert
+        self.logger.info(f"auto_ssl: issuing certificate for {domain}...")
+        
+        # Build acme.sh command
         cmd = [acme_sh, '--issue', '-d', domain, '--standalone', '--force']
         if server_block.auto_ssl_email:
             cmd.extend(['--email', server_block.auto_ssl_email])
+        
         try:
             import subprocess
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=120
+            )
             if result.returncode != 0:
-                self.logger.error(f"auto_ssl failed: {result.stderr[-500:]}")
+                self.logger.error(f"auto_ssl: acme.sh failed: {result.stderr[-500:]}")
                 return False
-            server_block.ssl_cert = cert_file
-            server_block.ssl_key = key_file
-            self.logger.info(f"auto_ssl: cert issued for {domain}")
-            return True
+            
+            # Install cert to standard location
+            install_cmd = [
+                acme_sh, '--install-cert', '-d', domain,
+                '--cert-file', cert_file,
+                '--key-file', key_file,
+                '--fullchain-file', os.path.join(cert_dir, 'fullchain.cer')
+            ]
+            subprocess.run(install_cmd, capture_output=True, timeout=30)
+            
+            if os.path.isfile(cert_file) and os.path.isfile(key_file):
+                server_block.ssl_cert = cert_file
+                server_block.ssl_key = key_file
+                self.logger.info(f"auto_ssl: certificate issued for {domain}")
+                return True
+            else:
+                self.logger.error(f"auto_ssl: cert files not found after issuance")
+                return False
+                
+        except subprocess.TimeoutExpired:
+            self.logger.error("auto_ssl: acme.sh timed out")
+            return False
         except Exception as e:
-            self.logger.error(f"auto_ssl error: {e}")
+            self.logger.error(f"auto_ssl: error issuing cert: {e}")
             return False
     def start(self):
         self.running = True
