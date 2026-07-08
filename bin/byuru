@@ -326,9 +326,14 @@ class ConfigFixer:
         # Fix 6: Normalize tabs
         config_fixed = config_fixed.replace('\t', '    ')
         
-        # Fix 7: Wrap bare server blocks in http {}
-        stripped = '\n'.join(l.strip() for l in config_fixed.split('\n') if l.strip())
-        if 'server {' in stripped and 'http {' not in stripped:
+        # Fix 7: Wrap bare server blocks in http {} (only if no http block exists)
+        has_http = False
+        for line in config_fixed.split('\n'):
+            stripped = line.strip()
+            if stripped.startswith('http') and stripped.endswith('{'):
+                has_http = True
+                break
+        if not has_http and 'server {' in config_fixed:
             config_fixed = 'http {\n' + config_fixed + '\n}'
         
         return config_fixed
@@ -1093,22 +1098,25 @@ class ByuruServer:
         self.bind_failed = False
 
     def load_config(self, config_text=None):
+        raw_text = None
         if config_text:
-            parser = ConfigParser(config_text)
+            raw_text = config_text
         elif self.config_path and os.path.exists(self.config_path):
             with open(self.config_path, 'r') as f:
-                parser = ConfigParser(f.read())
+                raw_text = f.read()
         else:
-            parser = ConfigParser(DEFAULT_CONFIG)
+            raw_text = DEFAULT_CONFIG
+        
+        # Pre-fix common issues before parsing
+        raw_text = ConfigFixer.fix(raw_text)
+        
+        parser = ConfigParser(raw_text)
         try:
             self.config = parser.parse()
         except ValueError as e:
-            self.logger.info(f"Config parse error: {e}")
-            self.logger.info("Attempting auto-fix...")
-            fixed_text = ConfigFixer.fix(parser.config_text)
-            parser = ConfigParser(fixed_text)
-            self.config = parser.parse()
-            self.logger.info("Config auto-fixed and parsed successfully")
+            self.logger.error(f"Config parse error: {e}")
+            raise
+        
         if 'worker_processes' in self.config:
             wp = self.config['worker_processes'][0]
             if wp == 'auto':
