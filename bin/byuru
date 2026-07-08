@@ -277,7 +277,61 @@ class ConfigParser:
         if self._current() != token:
             raise ValueError(f"Expected {token}, got {self._current()}")
         self.pos += 1
-
+class ConfigFixer:
+    """Auto-fix common byuru/nginx config syntax errors."""
+    
+    @staticmethod
+    def fix(config_text):
+        lines = config_text.split('\n')
+        fixed_lines = []
+        
+        for raw_line in lines:
+            line = raw_line
+            stripped = line.strip()
+            
+            # Skip empty lines and comments
+            if not stripped or stripped.startswith('#'):
+                fixed_lines.append(raw_line)
+                continue
+            
+            # Fix 1: Missing semicolon at end of simple directives
+            if not stripped.endswith(';') and not stripped.endswith('{') and not stripped.endswith('}'):
+                if '{' not in stripped and '}' not in stripped:
+                    if not any(stripped.startswith(kw) for kw in ('events', 'http', 'server', 'location', 'upstream', 'if')):
+                        line = line.rstrip() + ';'
+            
+            # Fix 2: Double semicolons
+            line = line.replace(';;', ';')
+            
+            # Fix 3: Missing space between directive and value
+            import re
+            line = re.sub(r'([a-zA-Z_][a-zA-Z0-9_]*)(\d)', r'\1 \2', line)
+            
+            fixed_lines.append(line)
+        
+        config_fixed = '\n'.join(fixed_lines)
+        
+        # Fix 4: Auto-close unclosed braces at EOF
+        open_count = config_fixed.count('{')
+        close_count = config_fixed.count('}')
+        if open_count > close_count:
+            config_fixed += '\n' + ('}\n' * (open_count - close_count))
+        
+        # Fix 5: Remove extra closing braces
+        while config_fixed.count('}') > config_fixed.count('{'):
+            last_brace = config_fixed.rfind('}')
+            if last_brace != -1:
+                config_fixed = config_fixed[:last_brace] + config_fixed[last_brace+1:]
+        
+        # Fix 6: Normalize tabs
+        config_fixed = config_fixed.replace('\t', '    ')
+        
+        # Fix 7: Wrap bare server blocks in http {}
+        stripped = '\n'.join(l.strip() for l in config_fixed.split('\n') if l.strip())
+        if 'server {' in stripped and 'http {' not in stripped:
+            config_fixed = 'http {\n' + config_fixed + '\n}'
+        
+        return config_fixed
 class HTTPRequest:
     def __init__(self):
         self.method = ''
@@ -1046,7 +1100,15 @@ class ByuruServer:
                 parser = ConfigParser(f.read())
         else:
             parser = ConfigParser(DEFAULT_CONFIG)
-        self.config = parser.parse()
+        try:
+            self.config = parser.parse()
+        except ValueError as e:
+            self.logger.info(f"Config parse error: {e}")
+            self.logger.info("Attempting auto-fix...")
+            fixed_text = ConfigFixer.fix(parser.config_text)
+            parser = ConfigParser(fixed_text)
+            self.config = parser.parse()
+            self.logger.info("Config auto-fixed and parsed successfully")
         if 'worker_processes' in self.config:
             wp = self.config['worker_processes'][0]
             if wp == 'auto':
