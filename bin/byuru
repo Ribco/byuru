@@ -81,8 +81,8 @@ events {
 http {
     include mime.types;
     default_type application/octet-stream;
-    access_log /var/log/byuru/access.log;
-    error_log /var/log/byuru/error.log;
+    access_log /data/data/com.termux/files/home/.byuru/logs/access.log;
+    error_log /data/data/com.termux/files/home/.byuru/logs/error.log;
     sendfile on;
     tcp_nopush on;
     tcp_nodelay on;
@@ -95,7 +95,7 @@ http {
     server {
         listen 3950;
         server_name localhost;
-        root /var/www/html;
+        root /data/data/com.termux/files/home/.byuru/www;
         index index.html index.htm;
         location / {
             try_files $uri $uri/ =404;
@@ -120,7 +120,7 @@ http {
     #     dynamic_subdomain_domain example.com;
     #     # Optional: JSON mapping for named subdomains
     #     # dynamic_subdomain_mapping /path/to/subdomain-map.json;
-    #     root /var/www/html;
+    #     root /data/data/com.termux/files/home/.byuru/www;
     #     index index.html;
     # }
 }
@@ -1264,16 +1264,27 @@ class DynamicPortRouter:
             self.stop()
 
     def _accept_loop(self):
+        # Use poll() instead of select() to handle thousands of sockets
+        poller = select.poll()
+        fd_to_sock = {}
+        for port, sock in self.sockets.items():
+            fd = sock.fileno()
+            fd_to_sock[fd] = sock
+            poller.register(fd, select.POLLIN)
+
         while self.running and self.sockets:
-            readable, _, _ = select.select(list(self.sockets.values()), [], [], 1.0)
-            for sock in readable:
-                try:
-                    client_sock, client_addr = sock.accept()
-                    listen_port = sock.getsockname()[1]
-                    t = threading.Thread(target=self._proxy_connection, args=(client_sock, client_addr, listen_port), daemon=True)
-                    t.start()
-                except OSError:
-                    pass
+            events = poller.poll(1000)  # 1 second timeout
+            for fd, flag in events:
+                if flag & select.POLLIN:
+                    sock = fd_to_sock.get(fd)
+                    if sock:
+                        try:
+                            client_sock, client_addr = sock.accept()
+                            listen_port = sock.getsockname()[1]
+                            t = threading.Thread(target=self._proxy_connection, args=(client_sock, client_addr, listen_port), daemon=True)
+                            t.start()
+                        except OSError:
+                            pass
 
     def _proxy_connection(self, client_sock, client_addr, listen_port):
         backend_sock = None
