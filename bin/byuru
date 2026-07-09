@@ -2,7 +2,7 @@
 """
 byuru - A lightweight HTTP server and reverse proxy
 Inspired by nginx. Built for everyone, everywhere.
-Version: 1.2.0
+Version: 1.2.1
 """
 
 
@@ -1211,6 +1211,126 @@ class HTTP2Connection:
                 pass
 
 
+
+
+class DynamicPortRouter:
+    """
+    Listen on multiple ports and transparently proxy each to localhost:same_port.
+    This bypasses Cloudflare entirely - users connect directly to your IP:PORT.
+
+    Usage in config:
+        dynamic_port_range 3000 3100;
+
+    Or CLI:
+        byuru --port-range 3000:3100
+    """
+    def __init__(self, start_port=3000, end_port=3100, logger=None):
+        self.start_port = start_port
+        self.end_port = end_port
+        self.logger = logger or Logger()
+        self.sockets = {}
+        self.running = False
+        self.threads = []
+
+    def start(self):
+        self.running = True
+        self.logger.info(f"DynamicPortRouter binding ports {self.start_port}-{self.end_port}...")
+        bound = 0
+        failed = 0
+        for port in range(self.start_port, self.end_port + 1):
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.setblocking(False)
+                sock.bind(('0.0.0.0', port))
+                sock.listen(128)
+                self.sockets[port] = sock
+                bound += 1
+            except PermissionError:
+                failed += 1
+            except OSError:
+                failed += 1
+        self.logger.info(f"[PortRouter] Bound {bound} ports, {failed} failed")
+
+        # Use select() to handle all sockets in one thread
+        t = threading.Thread(target=self._accept_loop, daemon=True)
+        t.start()
+        self.threads.append(t)
+
+        try:
+            while self.running:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            self.stop()
+
+    def _accept_loop(self):
+        while self.running and self.sockets:
+            readable, _, _ = select.select(list(self.sockets.values()), [], [], 1.0)
+            for sock in readable:
+                try:
+                    client_sock, client_addr = sock.accept()
+                    listen_port = sock.getsockname()[1]
+                    t = threading.Thread(target=self._proxy_connection, args=(client_sock, client_addr, listen_port), daemon=True)
+                    t.start()
+                except OSError:
+                    pass
+
+    def _proxy_connection(self, client_sock, client_addr, listen_port):
+        backend_sock = None
+        try:
+            backend_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            backend_sock.settimeout(30)
+            backend_sock.connect(('127.0.0.1', listen_port))
+
+            def forward(src, dst):
+                try:
+                    while True:
+                        data = src.recv(16384)
+                        if not data:
+                            break
+                        dst.sendall(data)
+                except (OSError, ConnectionResetError, BrokenPipeError):
+                    pass
+                finally:
+                    try:
+                        src.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+
+            t1 = threading.Thread(target=forward, args=(client_sock, backend_sock), daemon=True)
+            t2 = threading.Thread(target=forward, args=(backend_sock, client_sock), daemon=True)
+            t1.start()
+            t2.start()
+            t1.join()
+            t2.join()
+        except ConnectionRefusedError:
+            self.logger.error(f"[PortRouter] localhost:{listen_port} refused connection")
+            try:
+                client_sock.sendall(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
+            except:
+                pass
+        except Exception as e:
+            self.logger.error(f"[PortRouter] Error proxying port {listen_port}: {e}")
+        finally:
+            try:
+                client_sock.close()
+            except:
+                pass
+            if backend_sock:
+                try:
+                    backend_sock.close()
+                except:
+                    pass
+
+    def stop(self):
+        self.running = False
+        for port, sock in self.sockets.items():
+            try:
+                sock.close()
+            except:
+                pass
+        self.sockets.clear()
+
 class ByuruServer:
     def __init__(self, config_path=None, http2=False, tls=False):
         self.http2_enabled = http2
@@ -1525,7 +1645,7 @@ def print_banner():
      | \_\ \  \___  | |  |  /  |  | \/ |  |  / 
      |___  /  / ____| |____/   |__|    |____/  
          \/   \/                               
-    byuru v1.2.0 - Lightweight HTTP Server & Reverse Proxy
+    byuru v1.2.1 - Lightweight HTTP Server & Reverse Proxy
     """)
 
 def main():
@@ -1540,6 +1660,7 @@ def main():
     parser.add_argument('--tls', action='store_true', help='Enable HTTPS/TLS')
     parser.add_argument('--subdomain', metavar='DOMAIN', help='Enable dynamic subdomain proxy for DOMAIN (e.g., ph.quackify.qzz.io)')
     parser.add_argument('--subdomain-map', metavar='FILE', help='JSON file for named subdomain->port mappings')
+    parser.add_argument('--port-range', metavar='START:END', help='Enable dynamic port router (e.g., 3000:3100). Bypasses Cloudflare - users connect directly to IP:PORT')
     args = parser.parse_args()
     print_banner()
     server = ByuruServer(args.config, http2=args.http2, tls=args.tls)
@@ -1587,6 +1708,20 @@ def main():
     else:
         quick_config = None
     server.load_config(quick_config)
+
+    # Start dynamic port router if --port-range is specified
+    port_router = None
+    if args.port_range:
+        try:
+            start, end = map(int, args.port_range.split(':'))
+            port_router = DynamicPortRouter(start_port=start, end_port=end, logger=server.logger)
+            router_thread = threading.Thread(target=port_router.start, daemon=True)
+            router_thread.start()
+            server.logger.info(f"Dynamic port router started: {start}-{end}")
+        except ValueError:
+            print("Error: --port-range must be in format START:END (e.g., 3000:3100)")
+            sys.exit(1)
+
     server.start()
 
 if __name__ == '__main__':
