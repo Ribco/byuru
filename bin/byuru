@@ -1265,6 +1265,8 @@ class DynamicPortRouter:
 
     def _accept_loop(self):
         # Use poll() instead of select() to handle thousands of sockets
+        # Use a thread pool to avoid OOM on Android/Termux
+        from concurrent.futures import ThreadPoolExecutor
         poller = select.poll()
         fd_to_sock = {}
         for port, sock in self.sockets.items():
@@ -1272,19 +1274,20 @@ class DynamicPortRouter:
             fd_to_sock[fd] = sock
             poller.register(fd, select.POLLIN)
 
-        while self.running and self.sockets:
-            events = poller.poll(1000)  # 1 second timeout
-            for fd, flag in events:
-                if flag & select.POLLIN:
-                    sock = fd_to_sock.get(fd)
-                    if sock:
-                        try:
-                            client_sock, client_addr = sock.accept()
-                            listen_port = sock.getsockname()[1]
-                            t = threading.Thread(target=self._proxy_connection, args=(client_sock, client_addr, listen_port), daemon=True)
-                            t.start()
-                        except OSError:
-                            pass
+        # Thread pool: max 50 concurrent proxy threads
+        with ThreadPoolExecutor(max_workers=50) as executor:
+            while self.running and self.sockets:
+                events = poller.poll(1000)  # 1 second timeout
+                for fd, flag in events:
+                    if flag & select.POLLIN:
+                        sock = fd_to_sock.get(fd)
+                        if sock:
+                            try:
+                                client_sock, client_addr = sock.accept()
+                                listen_port = sock.getsockname()[1]
+                                executor.submit(self._proxy_connection, client_sock, client_addr, listen_port)
+                            except OSError:
+                                pass
 
     def _proxy_connection(self, client_sock, client_addr, listen_port):
         backend_sock = None
