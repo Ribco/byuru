@@ -2,8 +2,39 @@
 """
 byuru - A lightweight HTTP server and reverse proxy
 Inspired by nginx. Built for everyone, everywhere.
-Version: 1.1.0
+Version: 1.2.0
 """
+
+
+# ============================================================================
+# DYNAMIC SUBDOMAIN PROXY (v1.2.0)
+# ============================================================================
+# Routes subdomains to localhost ports automatically.
+#
+# EXAMPLE: 3001.yourdomain.com -> localhost:3001
+#          8080.yourdomain.com -> localhost:8080
+#
+# CONFIGURATION:
+#   server {
+#       listen 3950;
+#       server_name ~^(\d+)\.yourdomain\.com$;
+#       dynamic_subdomain on;
+#       dynamic_subdomain_domain yourdomain.com;
+#       dynamic_subdomain_mapping /path/to/map.json;  # optional
+#   }
+#
+# NAMED SUBDOMAINS (via JSON mapping):
+#   {
+#       "user1": 3001,
+#       "user2": 3002,
+#       "api": 8080
+#   }
+#   Then: user1.yourdomain.com -> localhost:3001
+#
+# CLOUDFLARE TUNNEL SETUP:
+#   1. DNS: Add CNAME *.yourdomain.com -> yourdomain.com (Proxied)
+#   2. Tunnel: Public Hostname *.yourdomain.com -> http://localhost:3950
+# ============================================================================
 
 import socket
 import threading
@@ -62,7 +93,7 @@ http {
     limit_req_zone $binary_remote_addr zone=one:10m rate=10r/s;
 
     server {
-        listen 8080;
+        listen 3950;
         server_name localhost;
         root /var/www/html;
         index index.html index.htm;
@@ -77,6 +108,21 @@ http {
         error_page 404 /404.html;
         error_page 500 502 503 504 /50x.html;
     }
+
+    # Dynamic subdomain proxy server
+    # Routes PORT.yourdomain.com -> localhost:PORT
+    # Example: 3001.example.com -> localhost:3001
+    # Uncomment and configure for your domain:
+    # server {
+    #     listen 3950;
+    #     server_name ~^(\d+)\.example\.com$;
+    #     dynamic_subdomain on;
+    #     dynamic_subdomain_domain example.com;
+    #     # Optional: JSON mapping for named subdomains
+    #     # dynamic_subdomain_mapping /path/to/subdomain-map.json;
+    #     root /var/www/html;
+    #     index index.html;
+    # }
 }
 """
 
@@ -530,6 +576,67 @@ class ReverseProxy:
         except Exception as e:
             return HTTPResponse(502, body=f'Bad Gateway: {e}'.encode())
 
+
+
+class DynamicSubdomainProxy:
+    """
+    Reverse proxy that extracts port from subdomain.
+    Matches: 3001.example.com -> localhost:3001
+    Also supports: user1.example.com -> localhost:PORT (via mapping file)
+    Usage in config:
+        dynamic_subdomain on;
+        dynamic_subdomain_domain example.com;
+        dynamic_subdomain_mapping /path/to/map.json;  # optional
+    """
+    def __init__(self, base_domain='example.com', timeout=60, mapping_file=None):
+        self.base_domain = base_domain
+        self.timeout = timeout
+        self.mapping_file = mapping_file
+        self.port_pattern = re.compile(r'^(\d+)\.' + re.escape(base_domain) + r'$')
+        self.subdomain_pattern = re.compile(r'^([a-zA-Z0-9_-]+)\.' + re.escape(base_domain) + r'$')
+
+    def _load_mapping(self):
+        """Load subdomain->port mapping from JSON file if provided."""
+        if self.mapping_file and os.path.isfile(self.mapping_file):
+            try:
+                with open(self.mapping_file, 'r') as f:
+                    return json.load(f)
+            except Exception:
+                return {}
+        return {}
+
+    def extract_port(self, host):
+        """Extract port number from subdomain like '3001.ph.quackify.qzz.io'"""
+        # First try numeric subdomain (3001.ph.quackify.qzz.io -> port 3001)
+        match = self.port_pattern.match(host)
+        if match:
+            port = int(match.group(1))
+            if 1 <= port <= 65535:
+                return port
+
+        # Then try named subdomain via mapping file (user1.ph.quackify.qzz.io -> mapped port)
+        mapping = self._load_mapping()
+        match = self.subdomain_pattern.match(host)
+        if match:
+            subdomain = match.group(1)
+            if subdomain in mapping:
+                port = int(mapping[subdomain])
+                if 1 <= port <= 65535:
+                    return port
+
+        return None
+
+    def handle(self, request):
+        host = request.headers.get('host', '')
+        port = self.extract_port(host)
+
+        if not port:
+            return HTTPResponse(404, body=b'Not Found: Invalid subdomain format. Use PORT.ph.quackify.qzz.io or configure a mapping file.')
+
+        upstream = f'http://127.0.0.1:{port}'
+        proxy = ReverseProxy(upstream, self.timeout)
+        return proxy.handle(request)
+
 class LoadBalancer:
     ROUND_ROBIN = 'round_robin'
     LEAST_CONN = 'least_conn'
@@ -568,7 +675,7 @@ class ServerBlock:
     def __init__(self, config, logger):
         self.config = config
         self.logger = logger
-        self.listen_port = 8080
+        self.listen_port = 3950
         self.server_names = []
         self.root = '/var/www/html'
         self.index_files = ['index.html', 'index.htm']
@@ -581,6 +688,9 @@ class ServerBlock:
         self.ssl_key = None
         self.auto_ssl = False
         self.auto_ssl_email = None
+        self.dynamic_subdomain = False
+        self.dynamic_subdomain_domain = 'example.com'
+        self.dynamic_subdomain_mapping = None
         self._parse_config()
     def _parse_config(self):
         cfg = self.config.get('config', {})
@@ -610,12 +720,32 @@ class ServerBlock:
             self.auto_ssl = cfg['auto_ssl'][0].lower() == 'on'
         if 'auto_ssl_email' in cfg:
             self.auto_ssl_email = cfg['auto_ssl_email'][0]
+        # Dynamic subdomain proxy config
+        if 'dynamic_subdomain' in cfg:
+            self.dynamic_subdomain = cfg['dynamic_subdomain'][0].lower() == 'on'
+        if 'dynamic_subdomain_domain' in cfg:
+            self.dynamic_subdomain_domain = cfg['dynamic_subdomain_domain'][0]
+        if 'dynamic_subdomain_mapping' in cfg:
+            self.dynamic_subdomain_mapping = cfg['dynamic_subdomain_mapping'][0]
         if 'limit_req' in cfg or 'limit_req_zone' in cfg:
             self.rate_limiter = RateLimiter(rate=10, per=1, burst=20)
 
     def handle_request(self, request):
         if self.rate_limiter and not self.rate_limiter.is_allowed(request.client_ip):
             return HTTPResponse(429, body=b'Too Many Requests')
+
+        # Dynamic subdomain proxy: PORT.ph.quackify.qzz.io -> localhost:PORT
+        if self.dynamic_subdomain:
+            host = request.headers.get('host', '')
+            # Check if host matches our dynamic subdomain domain
+            if self.dynamic_subdomain_domain in host:
+                dynamic_proxy = DynamicSubdomainProxy(
+                    base_domain=self.dynamic_subdomain_domain,
+                    timeout=60,
+                    mapping_file=self.dynamic_subdomain_mapping
+                )
+                return dynamic_proxy.handle(request)
+
         # Server name matching...
         
         # Location matching with nginx-style priority:
@@ -1395,19 +1525,21 @@ def print_banner():
      | \_\ \  \___  | |  |  /  |  | \/ |  |  / 
      |___  /  / ____| |____/   |__|    |____/  
          \/   \/                               
-    byuru v1.1.0 - Lightweight HTTP Server & Reverse Proxy
+    byuru v1.2.0 - Lightweight HTTP Server & Reverse Proxy
     """)
 
 def main():
     import argparse
     parser = argparse.ArgumentParser(description='byuru - Lightweight HTTP Server')
     parser.add_argument('-c', '--config', help='Path to configuration file')
-    parser.add_argument('-p', '--port', type=int, default=8080, help='Port to listen on')
+    parser.add_argument('-p', '--port', type=int, default=3950, help='Port to listen on')
     parser.add_argument('-r', '--root', default='./www', help='Document root')
     parser.add_argument('-t', '--test', action='store_true', help='Test configuration')
     parser.add_argument('-v', '--version', action='version', version=f'byuru/{__version__}')
     parser.add_argument('--http2', action='store_true', help='Enable HTTP/2 support')
     parser.add_argument('--tls', action='store_true', help='Enable HTTPS/TLS')
+    parser.add_argument('--subdomain', metavar='DOMAIN', help='Enable dynamic subdomain proxy for DOMAIN (e.g., ph.quackify.qzz.io)')
+    parser.add_argument('--subdomain-map', metavar='FILE', help='JSON file for named subdomain->port mappings')
     args = parser.parse_args()
     print_banner()
     server = ByuruServer(args.config, http2=args.http2, tls=args.tls)
@@ -1417,6 +1549,23 @@ def main():
         print("Configuration test successful!")
         return
     if not args.config:
+        # Build quick config with optional dynamic subdomain support
+        subdomain_block = ""
+        if args.subdomain:
+            map_directive = f"dynamic_subdomain_mapping {args.subdomain_map};" if args.subdomain_map else "# dynamic_subdomain_mapping /path/to/map.json;"
+            # Escape dots for regex
+            escaped_domain = args.subdomain.replace('.', '\.')
+            subdomain_block = f"""
+            server {{
+                listen {args.port};
+                server_name ~^(\d+)\.{escaped_domain}$;
+                dynamic_subdomain on;
+                dynamic_subdomain_domain {args.subdomain};
+                {map_directive}
+                root {args.root};
+                index index.html;
+            }}"""
+
         quick_config = f"""
         http {{
             server {{
@@ -1427,6 +1576,7 @@ def main():
                     try_files $uri $uri/ =404;
                 }}
             }}
+            {subdomain_block}
         }}
         """
         os.makedirs(args.root, exist_ok=True)
