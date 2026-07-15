@@ -1,12 +1,12 @@
  byuru
 
-[![Version](https://img.shields.io/badge/version-1.1.0-00d4aa)](https://github.com/Ribco/byuru)
+[![Version](https://img.shields.io/badge/version-1.2.0-00d4aa)](https://github.com/Ribco/byuru)
 [![License](https://img.shields.io/badge/license-MIT-00d4aa)](LICENSE)
 [![npm](https://img.shields.io/npm/v/byuru-server?color=00d4aa)](https://www.npmjs.com/package/byuru-server)
 
 > A lightweight HTTP server and reverse proxy, inspired by nginx. Built for everyone, everywhere.
 
-[![byuru](https://i.imgur.com/jLYqjw2.png)](https://byuru.qd.je)
+[![byuru](https://i.imgur.com/GpZtUxx.png)](https://byuru.qd.je)
 
 ## Features
 
