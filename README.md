@@ -117,3 +117,4 @@ Example config:
 ## License
 
 MIT License
+[![License][(https://img.shields.io/badge/license-MIT-00d4aa)](LICENSE)](https://github.com/Ribco/byuru/blob/main/LICENSE)
